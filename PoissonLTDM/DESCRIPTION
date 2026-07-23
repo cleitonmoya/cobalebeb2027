@@ -1,0 +1,9 @@
+Package: PoissonLTDM
+Title: Poisson Local Trend Dynamic Model
+Version: 0.0.1
+Author: Cleiton Moya de Almeida
+Maintainer: Cleiton Moya de Almeida <cleitonmoya@gmail.com>
+Description: Samplers and simulation code for the Poisson Local Trend Dynamic Model  
+License: MIT
+Encoding: UTF-8
+Imports: Matrix, Rfast, coda, rstan
