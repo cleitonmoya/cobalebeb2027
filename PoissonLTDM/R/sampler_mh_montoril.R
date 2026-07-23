@@ -1,4 +1,4 @@
-# Poisson - 2nd Order Polynomial Dynamic Model
+# Poisson Local Trend Dynamic Model
 #
 # Model:
 #  y_t ~ Poisson(exp{theta_t1})

@@ -7,7 +7,7 @@ logsumexp <- function(x) {
 }
 
 
-# Used in: sampler_pg_apf
+# Used in: sampler_pg_apf, sir_laplace
 # Log-likelihood
 log_p_yt <- function(yt, theta_t1) {
 	res <- yt * theta_t1 - exp(theta_t1)
@@ -161,11 +161,8 @@ cwmh_sample_theta1 <- function(y, theta_01, theta_02,
 	return(list(theta1 = theta1, n_ac = n_ac))
 }	
 
-
-# used in: sampler_mh_montoril
-# Sample theta2 using the Chan Method (conjugated Normal)
-make_chan_theta2_sampler <- function(Tt) {
-	
+# Used in: make_chan_theta2_sampler
+chan_build_static_objects <- function(Tt) {
 	# FIXED SPARSE STRUCTURES FOR CHAN METHOD ####
 	# Base for the prior Precision Matrix K
 	sub_diag_base <- rep(-1, Tt-1)
@@ -187,11 +184,29 @@ make_chan_theta2_sampler <- function(Tt) {
 	idx_sub <- which(sub_pattern@x)
 	
 	# Initial symbolic Cholesky factor
-	Ch02_factor <- Cholesky(K0, perm = FALSE, LDL = TRUE)
+	Ch0_factor <- Cholesky(K0, perm = FALSE, LDL = TRUE)
 	
-	# Work precision matrix (static)
-	P2_matrix <- K0
+	return(list(
+		K0 = K0, 
+		Ch0_factor = Ch0_factor,
+		main_diag_base = main_diag_base,
+		sub_diag_base = sub_diag_base,
+		idx_diag = idx_diag,
+		idx_sub = idx_sub))
+}
+
+
+# Used in: mh_montoril, sir_laplace
+# Sample theta2 using the Chan Method (conjugated Normal)
+make_chan_theta2_sampler <- function(Tt) {
 	
+	res <- chan_build_static_objects(Tt)
+	P2_matrix      <- res$K0
+	Ch02_factor    <- res$Ch0_factor
+	main_diag_base <- res$main_diag_base
+	sub_diag_base  <- res$sub_diag_base
+	idx_diag       <- res$idx_diag
+	idx_sub        <- res$idx_sub
 	
 	chan_sample_theta2 <- function(theta1, phi1, phi2, theta_02, Tt) {
 		
@@ -218,3 +233,46 @@ make_chan_theta2_sampler <- function(Tt) {
 	
 	return(chan_sample_theta2)
 }
+
+# Used in: sir_laplace
+make_chan_theta1_smoother <- function(Tt) {
+	
+	res <- chan_build_static_objects(Tt)
+	P1_matrix      <- res$K0
+	Ch01_factor    <- res$Ch0_factor
+	main_diag_base <- res$main_diag_base
+	sub_diag_base  <- res$sub_diag_base
+	idx_diag       <- res$idx_diag
+	idx_sub        <- res$idx_sub
+	
+	chan_smoothing_theta1 <- function(y, phi_V, phi1, theta_01, theta_02, theta2) {
+		Tt <- length(y)
+		P1_matrix@x[idx_diag] <- (main_diag_base * phi1) + phi_V
+		P1_matrix@x[idx_sub]  <- -phi1
+		Ch1_factor <- update(Ch01_factor, P1_matrix)
+		
+		b <- y * phi_V
+		Hb_theta2 <- numeric(Tt)
+		Hb_theta2[1] <- -theta2[1]
+		Hb_theta2[2:(Tt-1)] <- theta2[1:(Tt-2)] - theta2[2:(Tt-1)]
+		Hb_theta2[Tt] <- theta2[Tt-1]
+		b <- b + phi1*Hb_theta2
+		b[1] <- b[1] + phi1*(theta_01 + theta_02)
+		
+		theta1_hat <- as.numeric(Matrix::solve(Ch1_factor, b, system="A"))
+		list(theta1_hat=theta1_hat, ch=Ch1_factor)
+	}
+	
+	return(chan_smoothing_theta1)
+}
+
+
+# sir_laplace
+chan_sample_theta1 <- function(build_res) {
+	d <- Matrix::diag(build_res$ch)
+	u <- rnorm(Tt)
+	w <- u / sqrt(d)
+	x <- as.vector(Matrix::solve(build_res$ch, w, system="Lt"))
+	build_res$theta1_hat + x
+}
+

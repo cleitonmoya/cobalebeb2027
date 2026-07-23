@@ -10,9 +10,7 @@
 #               is non-conjugate, so the integrated likelihood is approximate)
 #       * theta1* : SIR + Chan sampler given accepted phi1
 #       * W2  : collapsed MH with CE proposal, marginalizing theta2 via
-#               EXACT closed-form Gaussian marginal likelihood (no approximation
-#               needed: theta2 never touches the Poisson likelihood, only the
-#               linear-Gaussian evolution of theta1, so integrating it out is exact)
+#               EXACT closed-form Gaussian marginal likelihood
 #       * theta2  : precision sampler (Chan), given accepted phi2
 #
 # Both collapsed samplers use the SAME mechanism (evaluate the integrated
