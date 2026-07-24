@@ -3,10 +3,11 @@ setwd(dirname(normalizePath(sys.frames()[[1]]$ofile)))
 
 
 rm(list = ls())     # clear the environment
+options(error = function() traceback(2)) # more informative traceback
 set.seed(42)
 
 source("../PoissonLTDM/R/utils.R")
-source("../PoissonLTDM/R/sampler_sir_laplace.R")
+source("../PoissonLTDM/R/sampler_stan.R")
 
 # Print auxiliary function
 printf <- function(...) cat(paste(sprintf(...), "\n"))
@@ -48,13 +49,28 @@ theta1 <- numeric(Tt)
 theta2 <- numeric(Tt)
 
 
+#####
+# Prepare STAN 
+options(mc.cores = 1)
+rstan::rstan_options(auto_write = FALSE)
+
+# Load or compile the model
+if (file.exists("../cache/poisson_ltdm.rds")) {
+	model <- readRDS("../cache/poisson_ltdm.rds")
+	printf("Model loaded")
+} else {
+	printf("Building the model")
+	file <- "../PoissonLTDM/inst/stan/poisson_ltdm.stan"
+	model <- rstan::stan_model(file = file, model_name = "PoissonLTDM")
+	saveRDS(model, file = "../cache/poisson_ltdm.rds")
+}
+
+start_time = proc.time() # execution time
 res <- sample_stan(
+			model        = model, 
 	        y            = y,
 			N            = N,
 			burnin       = burnin,
-			M_is         = M_is,
-			M_irls_max   = M_irls_max,
-			tol          = tol, 
 			mu_01        = mu_01,
 			sigma2_01    = sigma2_01,
 			mu_02        = mu_02,
@@ -68,9 +84,13 @@ res <- sample_stan(
 			theta_01     = theta_01,
 			theta_02     = theta_02,
 			theta1       = theta1,
-			theta2       = theta2,
-			theta1_tilde = theta1_tilde)
+			theta2       = theta2
+)
 
+# Execution time
+end_time <- proc.time()
+elapsed_time <- (end_time - start_time)[[1]]
+printf("Total elapsed CPU time: %.0f s", elapsed_time)
 
 theta_01_hist <- res$theta_01_hist
 theta_02_hist <- res$theta_02_hist
@@ -78,8 +98,9 @@ W1_hist       <- res$W1_hist
 W2_hist       <- res$W2_hist
 theta1_hist   <- res$theta1_hist
 theta2_hist   <- res$theta2_hist
-ess_is        <- res$ess_is
-itr_irls      <- res$itr_irls
+ac_hist       <- res$ac_hist
+elapsed_time  <- res$elapsed_time
+fit           <- res$fit
 
 #####
 theta1_mean <- colMeans(theta1_hist[-(1:burnin), ])
@@ -93,6 +114,12 @@ printf("W2 median: %.5f", median(W2_hist[-(1:burnin)]))
 
 loglik <- sum(dpois(y, lambda_mean, log=TRUE))
 printf("Log-likelihood: %.2f", loglik)
+
+
+library(bayesplot)
+np <- nuts_params(fit)
+mcmc_nuts_energy(np)
+
 
 # y, theta1_true, theta1_mean ####
 x <- 1:Tt
@@ -117,8 +144,3 @@ for (t in t_obs) {
 	plot(theta1_hist[, t], type="l", main=bquote(theta[.(t)*","*1]), xlab="", ylab="")
 	abline(v=burnin, col="red")
 }
-
-# Effective sample size ####
-par(mfrow=c(1,1), mar=c(4,4,2,2), cex=0.8)
-plot(ess_is, type="l", main="Effective Sample Size - SMC")
-abline(v=burnin, col="red")
