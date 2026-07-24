@@ -168,24 +168,24 @@ chan_build_static_objects <- function(Tt) {
 	# Base for the prior Precision Matrix K
 	sub_diag_base <- rep(-1, Tt-1)
 	main_diag_base <- c(rep(2, Tt-1), 1)
-	K0 <- bandSparse(n=Tt, k=c(0, -1),
+	K0 <- Matrix::bandSparse(n=Tt, k=c(0, -1),
 					 diagonals=list(main_diag_base, sub_diag_base),
 					 symmetric = TRUE)
 	# diagonal mask
 	# @x: slot of the Sparce matrix (S4 object) that contains the non-zero values
-	diag_pattern <- bandSparse(n=Tt, k=c(0, -1),
+	diag_pattern <- Matrix::bandSparse(n=Tt, k=c(0, -1),
 							   diagonals=list(rep(TRUE, Tt), rep(FALSE, Tt-1)),
 							   symmetric=TRUE)
 	idx_diag <- which(diag_pattern@x) # index of subpattern@x which is non-zero
 	
 	# subdiagonal mask
-	sub_pattern <- bandSparse(n=Tt, k=c(0, -1),
+	sub_pattern <- Matrix::bandSparse(n=Tt, k=c(0, -1),
 							  diagonals=list(rep(FALSE, Tt), rep(TRUE, Tt-1)),
 							  symmetric=TRUE)
 	idx_sub <- which(sub_pattern@x)
 	
 	# Initial symbolic Cholesky factor
-	Ch0_factor <- Cholesky(K0, perm = FALSE, LDL = TRUE)
+	Ch0_factor <- Matrix::Cholesky(K0, perm = FALSE, LDL = TRUE)
 	
 	return(list(
 		K0 = K0, 
@@ -200,7 +200,7 @@ chan_build_static_objects <- function(Tt) {
 # log|K0| (constant, precomputed once - used in the exact W2 marginal likelihood)
 chan_log_det_K0 <- function(Tt) {
 	res <- chan_build_static_objects(Tt)
-	log_det_K0 <- 2 * as.numeric(determinant(res$Ch0_factor, logarithm = TRUE)$modulus)
+	log_det_K0 <- 2 * as.numeric(Matrix::determinant(res$Ch0_factor, logarithm = TRUE)$modulus)
 	return(log_det_K0)
 }
 
@@ -224,7 +224,7 @@ make_chan_theta2_sampler <- function(Tt) {
 		P2_matrix@x[idx_diag] <<- (main_diag_base*phi2) + diag_obs
 		P2_matrix@x[idx_sub]  <<- -phi2
 		
-		Ch2_factor <- update(Ch02_factor, P2_matrix)
+		Ch2_factor <- Matrix::update(Ch02_factor, P2_matrix)
 		
 		b <- numeric(Tt)
 		b[1:(Tt-1)] <- z * phi1
@@ -257,7 +257,7 @@ make_chan_theta1_smoother <- function(Tt) {
 		Tt <- length(y)
 		P1_matrix@x[idx_diag] <- (main_diag_base * phi1) + phi_V
 		P1_matrix@x[idx_sub]  <- -phi1
-		Ch1_factor <- update(Ch01_factor, P1_matrix)
+		Ch1_factor <- Matrix::update(Ch01_factor, P1_matrix)
 		
 		b <- y * phi_V
 		Hb_theta2 <- numeric(Tt)
@@ -293,7 +293,7 @@ make_chan_theta2_smoother <- function(Tt) {
 		P2_matrix@x[idx_diag] <- (main_diag_base*phi2) + diag_obs
 		P2_matrix@x[idx_sub]  <- -phi2
 		
-		Ch2_factor <- update(Ch02_factor, P2_matrix)
+		Ch2_factor <- Matrix::update(Ch02_factor, P2_matrix)
 		
 		b <- numeric(Tt)
 		b[1:(Tt-1)] <- z * phi1

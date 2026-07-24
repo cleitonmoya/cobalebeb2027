@@ -55,7 +55,7 @@ is_log_lik <- function(irls_res, y, phi1, theta2, theta_01, theta_02, M_is) {
     
     W1 <- 1/phi1
 
-    log_det_H <- 2 * as.numeric(determinant(ch, logarithm = TRUE)$modulus)
+    log_det_H <- 2 * as.numeric(Matrix::determinant(ch, logarithm = TRUE)$modulus)
     th_lag2_fixed <- c(theta_02, theta2[-Tt])
     log_norm_H <- -Tt / 2 * log(2 * pi) + 0.5 * log_det_H
 
@@ -66,7 +66,7 @@ is_log_lik <- function(irls_res, y, phi1, theta2, theta_01, theta_02, M_is) {
     for (i in 1:M_is) {
         u <- u_mat[i, ]
         w <- u / sqrt(d_ch)
-        x <- as.vector(solve(ch, w, system = "Lt"))
+        x <- as.vector(Matrix::solve(ch, w, system = "Lt"))
         th <- eta_hat + x
 
         log_py <- sum(y * th - exp(th))
@@ -107,7 +107,7 @@ log_marginal_lik_w2 <- function(theta1, phi1, phi2, theta_02,
     diffs2 <- theta2_hat - c(theta_02, theta2_hat[-Tt])
     log_p_theta2 <- -0.5*Tt*log(2*pi/phi2) + 0.5*log_det_K0 - 0.5*phi2*sum(diffs2^2)
 
-    log_det_H <- 2 * as.numeric(determinant(ch, logarithm = TRUE)$modulus)
+    log_det_H <- 2 * as.numeric(Matrix::determinant(ch, logarithm = TRUE)$modulus)
     log_q <- -0.5*Tt*log(2*pi) + 0.5*log_det_H
 
     list(log_lik = log_pz + log_p_theta2 - log_q, build = build)
@@ -210,7 +210,7 @@ sir_theta1 <- function(irls_res, y, phi1, theta2, theta_01, theta_02, M_sir) {
     ch <- irls_res$theta1_build$ch
     W1 <- 1/phi1
 
-    log_det_H <- 2*as.numeric(determinant(ch, logarithm = TRUE)$modulus)
+    log_det_H <- 2*as.numeric(Matrix::determinant(ch, logarithm = TRUE)$modulus)
     th_lag2_fixed <- c(theta_02, theta2[-Tt])
     log_norm_H <- -(Tt/2)*log(2*pi) + 0.5*log_det_H
 

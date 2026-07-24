@@ -4,10 +4,9 @@ setwd(dirname(normalizePath(sys.frames()[[1]]$ofile)))
 
 rm(list = ls())     # clear the environment
 set.seed(42)
-options(error = function() traceback(2)) # more informative traceback
 
 source("../PoissonLTDM/R/utils.R")
-source("../PoissonLTDM/R/sampler_sir_collapsed.R")
+source("../PoissonLTDM/R/sampler_sir_laplace.R")
 
 # Print auxiliary function
 printf <- function(...) cat(paste(sprintf(...), "\n"))
@@ -19,13 +18,9 @@ Tt <- length(y)
 theta1_true <- data$theta
 
 # Simulation parameters
-N <- 10000            # Gibbs iterations
-burnin <- 1000
-R_prerun   <- 3000    # pre-run iterations to calibrate CE proposals (phi1 and phi2)
-M_is <- 3             # Number of particles - IS for W1 integrated likelihood
-M_sir <- 3            # Number of particles - SIR of theta1
-M_irls_max <- 20
-tol <- 1e-4
+N <- 10000           # number of steps
+burnin <- 1000       # number of burn-in steps
+
 
 # Prior hyperparameters
 # theta_01 ~ N(mu_01, sigma2_01)
@@ -51,15 +46,13 @@ theta_01 <- 0
 theta_02 <- 0
 theta1 <- numeric(Tt)
 theta2 <- numeric(Tt)
-theta1_tilde <- numeric(Tt)
 
-res <- sample_sir_collapsed(
+
+res <- sample_stan(
 	        y            = y,
 			N            = N,
 			burnin       = burnin,
-			R_prerun     = R_prerun,
 			M_is         = M_is,
-			M_sir        = M_sir,
 			M_irls_max   = M_irls_max,
 			tol          = tol, 
 			mu_01        = mu_01,
@@ -79,17 +72,14 @@ res <- sample_sir_collapsed(
 			theta1_tilde = theta1_tilde)
 
 
-theta_01_hist  <- res$theta_01_hist
-theta_02_hist  <- res$theta_02_hist
-W1_hist        <- res$W1_hist
-W2_hist        <- res$W2_hist
-theta1_hist    <- res$theta1_hist
-theta2_hist    <- res$theta2_hist
-itr_irls_hist  <- res$itr_irls_hist
-ess_is_hist    <- res$ess_is_hist
-ess_sir_hist   <- res$ess_sir_hist
-accepted1_hist <- res$accepted1_hist
-accepted2_hist <- res$accepted2_hist
+theta_01_hist <- res$theta_01_hist
+theta_02_hist <- res$theta_02_hist
+W1_hist       <- res$W1_hist
+W2_hist       <- res$W2_hist
+theta1_hist   <- res$theta1_hist
+theta2_hist   <- res$theta2_hist
+ess_is        <- res$ess_is
+itr_irls      <- res$itr_irls
 
 #####
 theta1_mean <- colMeans(theta1_hist[-(1:burnin), ])
@@ -128,12 +118,7 @@ for (t in t_obs) {
 	abline(v=burnin, col="red")
 }
 
-# Effective sample size for IS ####
+# Effective sample size ####
 par(mfrow=c(1,1), mar=c(4,4,2,2), cex=0.8)
-plot(ess_is_hist, type="l", main="Effective Sample Size - IS W1")
-abline(v=burnin, col="red")
-
-# Effective sample size of theta1 SIR ####
-par(mfrow=c(1,1), mar=c(4,4,2,2), cex=0.8)
-plot(ess_sir_hist, type="l", main="Effective Sample Size - SIR theta1")
+plot(ess_is, type="l", main="Effective Sample Size - SMC")
 abline(v=burnin, col="red")
