@@ -1,6 +1,6 @@
 # Common functions for the Poisson LTDM samplers
 
-# Used in: sampler_pg_apf, sampler_sir_laplace, sampler_sir_collapsed 
+# Used in: pg_apf, sir_laplace, sir_collapsed 
 logsumexp <- function(x) {
 	cc <- max(x)
 	return(cc + log(sum(exp(x - cc))))
@@ -14,7 +14,7 @@ log_p_yt <- function(yt, theta_t1) {
 	return(res)
 }
 
-# Used in: mh_cw, mh_montoril
+# Used in: mh_cw, mh_montoril, pg_apf, sir_laplace, sir_collapsed
 gibbs_sample_theta01 <- function(mu_01, sigma2_01, theta_11, theta_02, W1) {
 	sigma2_01_bar <- (1/sigma2_01 + 1/W1)^(-1)
 	mu_01_bar <- sigma2_01_bar*(mu_01/sigma2_01 + (theta_11 - theta_02)/W1)
@@ -23,7 +23,7 @@ gibbs_sample_theta01 <- function(mu_01, sigma2_01, theta_11, theta_02, W1) {
 }
 
 
-# Used in: mh_cw, mh_montoril
+# Used in: mh_cw, mh_montoril, pg_apf, sir_laplace, sir_collapsed
 gibbs_sample_theta02 <- function(mu_02, sigma2_02, theta_01, theta_11,
 								 theta_12, W1, W2) {
 	
@@ -35,7 +35,7 @@ gibbs_sample_theta02 <- function(mu_02, sigma2_02, theta_01, theta_11,
 }
 
 
-# Used in: mh_cw, mh_montoril
+# Used in: mh_cw, mh_montoril, pg_apf, sir_laplace, sir_collapsed
 gibbs_sample_phi1 <- function(nu_01, eta_01, theta_01, theta1, theta_02, theta2, Tt) {
 	nu_01_bar <- nu_01 + Tt/2
 	dif1 <- theta1 - c(theta_01, theta1[-Tt])
@@ -46,7 +46,7 @@ gibbs_sample_phi1 <- function(nu_01, eta_01, theta_01, theta1, theta_02, theta2,
 }
 
 
-# Used in: mh_cw, mh_montoril
+# Used in: mh_cw, mh_montoril, pg_apf, sir_laplace, sir_collapsed
 gibbs_sample_phi2 <- function(nu_02, eta_02, theta_02, theta2, Tt) {
 	nu_02_bar <- nu_02 + Tt/2
 	diffs2 <- theta2 - c(theta_02, theta2[-Tt])
@@ -161,8 +161,9 @@ cwmh_sample_theta1 <- function(y, theta_01, theta_02,
 	return(list(theta1 = theta1, n_ac = n_ac))
 }	
 
-# Used in: make_chan_theta2_sampler
+# Used in: make_chan_theta2_sampler, make_chan_theta1_smoother, make_chan_theta2_smoother
 chan_build_static_objects <- function(Tt) {
+	
 	# FIXED SPARSE STRUCTURES FOR CHAN METHOD ####
 	# Base for the prior Precision Matrix K
 	sub_diag_base <- rep(-1, Tt-1)
@@ -195,8 +196,15 @@ chan_build_static_objects <- function(Tt) {
 		idx_sub = idx_sub))
 }
 
+# Used in: sir_collapsed
+# log|K0| (constant, precomputed once - used in the exact W2 marginal likelihood)
+chan_log_det_K0 <- function(Tt) {
+	res <- chan_build_static_objects(Tt)
+	log_det_K0 <- 2 * as.numeric(determinant(res$Ch0_factor, logarithm = TRUE)$modulus)
+	return(log_det_K0)
+}
 
-# Used in: mh_montoril, sir_laplace
+# Used in: mh_montoril, pg_apf, sir_laplace
 # Sample theta2 using the Chan Method (conjugated Normal)
 make_chan_theta2_sampler <- function(Tt) {
 	
@@ -234,7 +242,7 @@ make_chan_theta2_sampler <- function(Tt) {
 	return(chan_sample_theta2)
 }
 
-# Used in: sir_laplace
+# Used in: sir_laplace, sir_collapsed
 make_chan_theta1_smoother <- function(Tt) {
 	
 	res <- chan_build_static_objects(Tt)
@@ -267,12 +275,46 @@ make_chan_theta1_smoother <- function(Tt) {
 }
 
 
-# sir_laplace
-chan_sample_theta1 <- function(build_res) {
-	d <- Matrix::diag(build_res$ch)
-	u <- rnorm(Tt)
-	w <- u / sqrt(d)
-	x <- as.vector(Matrix::solve(build_res$ch, w, system="Lt"))
-	build_res$theta1_hat + x
+# Used in: sir_collapsed
+make_chan_theta2_smoother <- function(Tt) {
+	
+	res <- chan_build_static_objects(Tt)
+	P2_matrix      <- res$K0
+	Ch02_factor    <- res$Ch0_factor
+	main_diag_base <- res$main_diag_base
+	sub_diag_base  <- res$sub_diag_base
+	idx_diag       <- res$idx_diag
+	idx_sub        <- res$idx_sub
+	
+	chan_smoothing_theta2 <- function(theta1, phi1, phi2, theta_02) {
+		z <- diff(theta1)   # z_t = theta1[t+1] - theta1[t], t=1,...,T-1
+		
+		diag_obs <- c(rep(phi1, Tt-1), 0)
+		P2_matrix@x[idx_diag] <- (main_diag_base*phi2) + diag_obs
+		P2_matrix@x[idx_sub]  <- -phi2
+		
+		Ch2_factor <- update(Ch02_factor, P2_matrix)
+		
+		b <- numeric(Tt)
+		b[1:(Tt-1)] <- z * phi1
+		b[1] <- b[1] + theta_02 * phi2
+		
+		theta2_hat <- as.numeric(Matrix::solve(Ch2_factor, b, system="A"))
+		list(theta2_hat = theta2_hat, ch = Ch2_factor, z = z)
+	}
 }
 
+# Used in: sir_collapsed
+# It can be used with theta1 or theta2
+chan_sample_from_build <- function(build, Tt) {
+	
+	ch <- build$ch
+	theta_hat <- build[[1]] # theta1_hat or theta2_hat, always the first element
+	
+	d <- Matrix::diag(ch)
+	u <- rnorm(Tt)
+	w <- u / sqrt(d)
+	x <- as.vector(Matrix::solve(ch, w, system="Lt"))
+	
+	return(theta_hat + x)
+}
