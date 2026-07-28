@@ -12,8 +12,11 @@
 # randomly drawn parameters (breakpoints via Dirichlet gaps, levels/amplitudes
 # via uniform/normal draws). Each replica is saved as an individual .rds file
 # following the pattern: <function>_<Tt>_<replica>.rds
+#
+# Author: Conceptual design: Cleiton Moya de Almeida 
+#         Detailed design and code: Claude Sonnet 5 (low effort)
 
-set.seed(42)  # single global seed
+set.seed(42)  # sin50gle global seed
 
 # Change de directory to the same of the current file
 setwd(dirname(normalizePath(sys.frames()[[1]]$ofile)))
@@ -189,12 +192,16 @@ simulate_and_save <- function(Tt_grid, K, output_dir) {
     
     func_names <- names(function_registry)
     
-    for (Tt in Tt_grid) {
-        for (func_name in func_names) {
-            entry <- function_registry[[func_name]]
+    for (func_name in func_names) {
+        entry <- function_registry[[func_name]]
+        
+        for (r in 1:K) {
             
-            for (r in 1:K) {
-                params <- entry$gen_params()
+            # Parameters drawn ONCE per (function, replica) -> same waveform
+            # shape across all Tt in the grid, only the discretization changes.
+            params <- entry$gen_params()
+            
+            for (Tt in Tt_grid) {
                 theta1 <- entry$gen_series(Tt, params)
                 y      <- rpois(Tt, lambda = exp(theta1))
                 
@@ -215,7 +222,6 @@ simulate_and_save <- function(Tt_grid, K, output_dir) {
     
     invisible(NULL)
 }
-
 
 # -----------------------------------------------------------------------------
 # 5. Execution: 4 functions x K = 50 replicas x 4 values of Tt

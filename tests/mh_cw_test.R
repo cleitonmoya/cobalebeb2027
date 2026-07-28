@@ -95,7 +95,6 @@ lines(x, theta1_true, col="blue", lwd=2)
 legend("topright", legend=expression(hat(theta)[t1], theta[t1]),
 		   col=c("red","blue"), lwd=2, bty="n")
 
-
 # theta2_true, theta2_mean
 par(mfrow=c(1,1), mar=c(4,4,2,2), cex=0.8)
 plot(x, theta2_mean, type="l", col="red", lwd=2,

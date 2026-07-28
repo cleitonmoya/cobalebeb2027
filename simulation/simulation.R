@@ -14,9 +14,40 @@ setwd(dirname(normalizePath(sys.frames()[[1]]$ofile)))
 # Print auxiliary function
 printf <- function(...) cat(paste(sprintf(...), "\n"))
 
+
+# General simulation parameters
+N <- 10000          # number of iterations
+burnin <- 1000
+
+# Prior hyperparameters
+# theta_01 ~ N(mu_01, sigma2_01)
+mu_01     <- 0
+sigma2_01 <- 100
+
+# theta_02 ~ N(mu_2, sigma2_02)
+mu_02     <- 0
+sigma2_02 <- 100
+
+# phi1 = W1^(-1) ~ Gamma(nu_01, eta_01)
+nu_01  <- 2
+eta_01 <- 0.01
+
+# phi2 = W2^(-1) ~ Gamma(nu_02, eta_02)
+nu_02  <- 2
+eta_02 <- 0.0001
+
+# Initialization
+W2 <- 0.01
+W1 <- 0.01
+theta_01 <- 0
+theta_02 <- 0
+
+
+# General hyperparameters
+
 # Build the Task Grid 
 Tt_grid <- c(200, 400, 800, 2000)
-functions_grid <- c("block", "piecewise_linear", "heavisine", "piecewise_pol")
+functions_grid <- c("constant", "linear", "quadratic", "sinusoidal")
 methods_grid <- c("mh_cw", "mh_montoril", "pg_apf", "sir_collapsed", "sir_laplace", "stan")
 N_replicas <- 50
 
@@ -72,6 +103,11 @@ run_task <- function(task) {
 	replica <- task$replica
 	seed <- task$seed
 
+	# Initial values for theta1, theta2 (need Tt) 
+	theta1 <- numeric(Tt)
+	theta2 <- numeric(Tt)
+	
+	
 	file_name  <- task_file_name(task)
 	file_star_name <- task_star_file_name(task)
 
@@ -81,15 +117,15 @@ run_task <- function(task) {
 	} else {
 		
 		# Load the data
-		f_teste <- obter_funcao_teste(funcao)
-		dados   <- gerar_dados_poisson(f = f_teste, Tt = Tt, seed = seed_data)
-		y            <- dados$y
-		theta1_true  <- dados$theta1_true
+		file_name <- sprintf("%s_%d_%d.rds", f, Tt, replica)
+		data <- readRDS(file_name)
+		y <- data$y
 		
-		# hiperparametros de priori calibrados a partir de f(t) (ja decidido em conversas anteriores)
-		priors <- calibrar_priors(f_teste, Tt)
 		
-		# --- 3.2 rodar o metodo correspondente ---
+		# hiperparametros de priori calibrados a partir de f(t)
+		priors <- calibrar_priors(f, Tt)
+		
+		# Run the task
 		set.seed(seed)
 		
 		tempo <- system.time({
