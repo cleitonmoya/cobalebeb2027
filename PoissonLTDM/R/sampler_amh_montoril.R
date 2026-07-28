@@ -18,7 +18,7 @@
 # Author: Cleiton Moya de Almeida
 
 
-sample_mh_montoril <- function(y, N, burnin, varsigma2,
+sample_amh_montoril <- function(y, N, burnin, varsigma2, ac_ref,
                          mu_01, sigma2_01, mu_02, sigma2_02,
                          nu_01, eta_01, nu_02, eta_02,
                          W1, W2, theta_01, theta_02, theta1, theta2){
@@ -35,7 +35,7 @@ sample_mh_montoril <- function(y, N, burnin, varsigma2,
     W2_hist <- numeric(N)
     theta_01_hist <-numeric(N)
     theta_02_hist <-numeric(N)
-    ac_hist <- numeric(N)
+    ac_hist <- matrix(0, nrow=N, ncol=Tt)
 
     # Gibbs sampling
     for (n in 1:N) {
@@ -61,8 +61,13 @@ sample_mh_montoril <- function(y, N, burnin, varsigma2,
         res_theta1 <- cwmh_sample_theta1(y, theta_01, theta_02,
                                      theta1, theta2, W1, varsigma2, Tt)
         theta1 <-res_theta1$theta1
-        n_ac <- res_theta1$n_ac
+        ac_hist[n,] <- res_theta1$ac
 
+        # Adaptive stage of varsigma2
+        delta <- min(0.01, 1/sqrt(n))
+        ls <- log(varsigma2)/2 + delta*(ac_hist[n,] - ac_ref)
+        varsigma2 <- exp(2*ls)
+        
         # Sample theta2 (Chan Method)
         theta2 <- chan_sample_theta2(theta1, phi1, phi2, theta_02, Tt)
 
@@ -73,7 +78,6 @@ sample_mh_montoril <- function(y, N, burnin, varsigma2,
         W2_hist[n] <- W2
         theta1_hist[n, ] <- theta1
         theta2_hist[n, ] <- theta2
-        ac_hist[n] <- n_ac/Tt # mean acceptance ratio of theta_t1
     }
 
     return(list(

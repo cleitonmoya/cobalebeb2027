@@ -121,15 +121,11 @@ run_task <- function(task) {
 		data <- readRDS(file_name)
 		y <- data$y
 		
-		
-		# hiperparametros de priori calibrados a partir de f(t)
-		priors <- calibrar_priors(f, Tt)
-		
 		# Run the task
 		set.seed(seed)
 		
-		tempo <- system.time({
-			resultado <- switch(metodo,
+		execution_time <- system.time({
+			resultado <- switch(method,
 								"mh_cw"          = sample_mh_cw(y, priors, n_iter = 5000, burnin = 1000),
 								"mh_montoril"    = sample_mh_montoril(y, priors, n_iter = 5000, burnin = 1000),
 								"pg_apf"         = sample_pg_apf(y, priors, n_iter = 5000, burnin = 1000, n_particulas = 200),
@@ -139,7 +135,7 @@ run_task <- function(task) {
 								stop(sprintf("Metodo desconhecido: %s", metodo))
 			)
 		})
-		tempo_total <- tempo[["elapsed"]]
+		elapsed_time <- execution_time[["elapsed"]]
 		
 		# --- 3.3 calcular metricas ---
 		ess_theta1    <- calcular_ess(resultado$theta1_hist)

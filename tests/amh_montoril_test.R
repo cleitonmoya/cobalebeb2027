@@ -1,21 +1,28 @@
 # Change de directory to the same of the current file
 setwd(dirname(normalizePath(sys.frames()[[1]]$ofile)))
 
+
+rm(list = ls())     # clear the environment
 set.seed(42)
 
 source("../PoissonLTDM/R/utils.R")
-source("../PoissonLTDM/R/sampler_mh_cw.R")
+source("../PoissonLTDM/R/sampler_amh_montoril.R")
+
+# Print auxiliary function
+printf <- function(...) cat(paste(sprintf(...), "\n"))
 
 # Load the data
-data <- readRDS("../data/poisson_pol2_200.rds")
+data <- readRDS("../data/simulated/quadratic_200_1.rds")
 y <- data$y
 Tt <- length(y)
 theta1_true <- data$theta
 
 # Simulation parameters
-N <- 10000           # Number of steps
-burnin <- 1000       # Number of burn-in steps
-varsigma2 <- 0.05
+N <- 10000                 # Number of steps
+burnin <- 1000             # Number of burn-in steps
+varsigma2 <- rep(0.02, Tt) # RWM variance initialization (adaptive algorithm)
+ac_ref <- 0.44             # acceptance ratio target
+
 
 # Prior hyperparameters
 # theta_01 ~ N(mu_01, sigma2_01)
@@ -43,11 +50,12 @@ theta1 <- numeric(Tt)
 theta2 <- numeric(Tt)
 
 
-res <- sample_mh_cw(
-            y         = y,
+res <- sample_amh_montoril(
+	        y         = y,
 			N         = N,
 			burnin    = burnin,
 			varsigma2 = varsigma2,
+			ac_ref    = ac_ref,
 			mu_01     = mu_01,
 			sigma2_01 = sigma2_01,
 			mu_02     = mu_02,
@@ -64,13 +72,14 @@ res <- sample_mh_cw(
 			theta2    = theta2
 )
 
-theta_01_hist = res$theta_01_hist
-theta_02_hist = res$theta_02_hist
-W1_hist = res$W1_hist
-W2_hist = res$W2_hist
-theta1_hist = res$theta1_hist
-theta2_hist = res$theta2_hist
-ac_hist = res$ac_hist
+theta_01_hist <- res$theta_01_hist
+theta_02_hist <- res$theta_02_hist
+W1_hist       <- res$W1_hist
+W2_hist       <- res$W2_hist
+theta1_hist   <- res$theta1_hist
+theta2_hist   <- res$theta2_hist
+ac_hist       <- res$ac_hist
+
 
 #####
 theta1_mean <- colMeans(theta1_hist[-(1:burnin), ])
@@ -85,6 +94,7 @@ printf("W2 median: %.5f", median(W2_hist[-(1:burnin)]))
 loglik <- sum(dpois(y, lambda_mean, log=TRUE))
 printf("Log-likelihood: %.2f", loglik)
 
+
 # y, theta1_true, theta1_mean ####
 x <- 1:Tt
 par(mfrow=c(1,1), mar=c(4,4,2,2), cex=0.8)
@@ -95,6 +105,7 @@ lines(x, theta1_true, col="blue", lwd=2)
 legend("topright", legend=expression(hat(theta)[t1], theta[t1]),
 		   col=c("red","blue"), lwd=2, bty="n")
 
+
 # theta2_true, theta2_mean
 par(mfrow=c(1,1), mar=c(4,4,2,2), cex=0.8)
 plot(x, theta2_mean, type="l", col="red", lwd=2,
@@ -102,3 +113,9 @@ plot(x, theta2_mean, type="l", col="red", lwd=2,
 legend("topright", legend=expression(hat(theta)[t2]), col="red", lwd=2, bty="n")
 
 
+# Traceplot of mean acceptance ratio of theta_t1 (over t) ####
+par(mfrow = c(1, 1), mar = c(4, 4, 2, 2), cex=0.8) # bottom left, top, right
+plot(Rfast::rowmeans(ac_hist), type="l", xlab="n", ylab="ratio",
+	 main=expression("Acceptance ratio of " * theta[t*1] * " (mean over t)"))
+abline(h=ac_ref, col="blue", lty=2)
+abline(v=burnin, col="red")

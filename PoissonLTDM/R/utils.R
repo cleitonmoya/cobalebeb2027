@@ -123,13 +123,12 @@ sample_theta_t1_mh <- function(theta_t1_current, theta_tm11, theta_tp11,
 }
 
 
-# Used in: mh_cw, mh_montoril
+# Used in: mh_montoril
 # Sample theta1 using component-wise Metropolis (Random Walking)
 cwmh_sample_theta1 <- function(y, theta_01, theta_02, 
 							   theta1, theta2, W1, varsigma2, Tt) {
 	
-	n_ac <- 0 # number of accepted samples
-	
+	ac <- numeric(Tt)
 	for (t in 1:Tt) {
 		
 		if (t < Tt) {
@@ -138,27 +137,26 @@ cwmh_sample_theta1 <- function(y, theta_01, theta_02,
 				# theta_t11
 				res <- sample_theta_t1_mh(theta1[t], theta_01, theta1[t+1],
 										  theta2[t], theta_02,
-										  y[t], W1, varsigma2, final_t=FALSE)
+										  y[t], W1, varsigma2[t], final_t=FALSE)
 				theta1[t] <- res$theta_t1
 			} else {
 				
 				res <- sample_theta_t1_mh(theta1[t], theta1[t-1], theta1[t+1],
 										  theta2[t], theta2[t-1],
-										  y[t], W1, varsigma2, final_t=FALSE)
+										  y[t], W1, varsigma2[t], final_t=FALSE)
 				theta1[t] <- res$theta_t1
 			}
 			
 		} else {
 			res <- sample_theta_t1_mh(theta1[t], theta1[t-1], NULL,
 									  theta2[t], theta2[t-1],
-									  y[t], W1, varsigma2, final_t=TRUE)
+									  y[t], W1, varsigma2[t], final_t=TRUE)
 			theta1[t] <- res$theta_t1
 		}
 		
-		ac <- res$ac # flag: sample accepted(1) or not (0)
-		n_ac <- n_ac + ac
+		ac[t] <- res$ac # flag: sample accepted(1) or not (0)
 	}
-	return(list(theta1 = theta1, n_ac = n_ac))
+	return(list(theta1 = theta1, ac = ac))
 }	
 
 # Used in: make_chan_theta2_sampler, make_chan_theta1_smoother, make_chan_theta2_smoother

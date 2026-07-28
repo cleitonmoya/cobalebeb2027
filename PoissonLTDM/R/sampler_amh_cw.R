@@ -12,8 +12,9 @@
 #  1/W2 ~ gamma(shape=nu_02, rate=eta_02)
 #
 # MCMC:
-#  theta_t1: Component-Wise Metropolis within Gibbs
-#    Metropolis proposal: Random Walking
+#  theta_t1: Adaptive Metropolis within Gibbs (Roberts & Rosenthal, 2009)
+#            with continuous Robbins-Monro update of the \log\sigma_t
+#            (Andrieu & Thoms 2008, Eq. 20/22) instead of batch update.
 #  theta_t2: Component-Wise (conjugated Normal)
 #
 # Reference: Geweke, J., & Tanizaki, H. (2001).
@@ -24,7 +25,7 @@
 # Author: Cleiton Moya de Almeida
 
 
-sample_mh_cw <- function(y, N, burnin, varsigma2,
+sample_amh_cw <- function(y, N, burnin, varsigma2, ac_ref,
                           mu_01, sigma2_01, mu_02, sigma2_02,
                           nu_01, eta_01, nu_02, eta_02,
                           W1, W2, theta_01, theta_02, theta1, theta2){
@@ -38,7 +39,7 @@ sample_mh_cw <- function(y, N, burnin, varsigma2,
     W2_hist <- numeric(N)
     theta_01_hist <-numeric(N)
     theta_02_hist <-numeric(N)
-    ac_hist <- numeric(N)
+    ac_hist <- matrix(0, nrow=N, ncol=Tt)
 
     # Gibbs sampling
     for (n in 1:N) {
@@ -60,7 +61,7 @@ sample_mh_cw <- function(y, N, burnin, varsigma2,
         phi2 <- gibbs_sample_phi2(nu_02, eta_02, theta_02, theta2, Tt)
         W2 <- 1/phi2
 
-        # Sample theta1 (component-wise Metropolis) and
+        # Sample theta1 (component-wise Adaptive Metropolis) and
         #        theta2 (component-wise conjugated Normal)
         n_ac <- 0 # number of accepted samples
         for (t in 1:Tt) {
@@ -73,7 +74,7 @@ sample_mh_cw <- function(y, N, burnin, varsigma2,
                     # theta_t11
                     res <- sample_theta_t1_mh(theta1[t], theta_01, theta1[t+1],
                                               theta2[t], theta_02,
-                                              y[t], W1, varsigma2, final_t=FALSE)
+                                              y[t], W1, varsigma2[t], final_t=FALSE)
                     theta1[t] <- res$theta_t1
                     # theta_t12
                     mu_star <- sigma2_star*((theta1[t+1] - theta1[t])/W1 +
@@ -82,7 +83,7 @@ sample_mh_cw <- function(y, N, burnin, varsigma2,
                     
                     res <- sample_theta_t1_mh(theta1[t], theta1[t-1], theta1[t+1],
                                               theta2[t], theta2[t-1],
-                                              y[t], W1, varsigma2, final_t=FALSE)
+                                              y[t], W1, varsigma2[t], final_t=FALSE)
                     theta1[t] <- res$theta_t1
                     mu_star <- sigma2_star*((theta1[t+1] - theta1[t])/W1 +
                                                 (theta2[t-1] + theta2[t+1])/W2)
@@ -91,16 +92,21 @@ sample_mh_cw <- function(y, N, burnin, varsigma2,
             } else {
                 res <- sample_theta_t1_mh(theta1[t], theta1[t-1], NULL,
                                           theta2[t], theta2[t-1],
-                                          y[t], W1, varsigma2, final_t=TRUE)
+                                          y[t], W1, varsigma2[t], final_t=TRUE)
                 theta1[t] <- res$theta_t1
                 mu_star <- theta2[t-1]
                 sigma2_star <- W2
             }
             
             theta2[t] <- rnorm(1, mean=mu_star, sd=sqrt(sigma2_star))
-            ac <- res$ac # flag: sample accepted(1) or not (0)
-            n_ac <- n_ac + ac
+            ac_hist[n,t] <- res$ac # flag: sample accepted(1) or not (0)
+            
         }
+        
+        # Adaptive stage of varsigma2
+        delta <- min(0.01, 1/sqrt(n))
+        ls <- log(varsigma2)/2 + delta*(ac_hist[n,] - ac_ref)
+        varsigma2 <- exp(2*ls)
 
         # Store the sampled values
         theta_01_hist[n] <- theta_01
@@ -109,7 +115,6 @@ sample_mh_cw <- function(y, N, burnin, varsigma2,
         W2_hist[n] <- W2
         theta1_hist[n, ] <- theta1
         theta2_hist[n, ] <- theta2
-        ac_hist[n] <- n_ac/Tt # mean acceptance ratio of theta_t1
     }
 
     return(list(
