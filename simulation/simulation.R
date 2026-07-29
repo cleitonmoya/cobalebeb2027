@@ -19,6 +19,23 @@ printf <- function(...) cat(paste(sprintf(...), "\n"))
 N <- 10000          # number of iterations
 burnin <- 1000
 
+# Adaptive Metropolis hyperparameters
+# (for amh_cw and amg_montoril)
+varsigma2_scal <- 0.02     # initial varsigma2
+ac_ref <- 0.44             # acceptance ratio target
+
+# Particle Gibbs (sir_pg) hyperparameter
+K <- 50  # Number of particles
+
+# SIR Laplace and SIR Collapsed  hyperparameters
+M_is <- 3             # Number of particles - IS for W1 integrated likelihood
+M_irls_max <- 20
+tol <- 1e-4
+
+# Only for SIR Collapsed
+R_prerun <- 3000      # pre-run iterations to calibrate CE proposals (phi1 and phi2)
+M_sir <- 3            # Number of particles - SIR of theta1
+
 # Prior hyperparameters
 # theta_01 ~ N(mu_01, sigma2_01)
 mu_01     <- 0
@@ -41,7 +58,7 @@ W2 <- 0.01
 W1 <- 0.01
 theta_01 <- 0
 theta_02 <- 0
-
+theta1_tilde_scal <- 0 # sir_laplace and sir_collapsed
 
 # General hyperparameters
 
@@ -78,19 +95,25 @@ task_grid$seed <- 1:grid_size
 
 
 task_file_name <- function(task) {
-	path_partial <- "results/partial/"
-	file_name <- sprintf("%s/Tt%d_%s_%s_r%03d.rds",
+	path_partial <- "results/partial"
+	file_name <- sprintf("%s/%d_%s_%s_r%03d.rds",
 						 path_partial, task$Tt, task$f,
 						 task$method, task$replica)
 	return(file_name)
 }
-
 
 task_star_file_name <- function(task) {
 	path_star <- "results/star"
 	file_name <- sprintf("%s/Tt%d_%s_%s_r%03d.rds",
 						 path_star, task$Tt, task$f,
 						 task$method, task$replica)
+	return(file_name)
+}
+
+data_file_name <- function(task) {
+	path_data <- "../data/simulated"
+	file_name <- sprintf("%s/%s_%d_%d.rds",
+						 path_data, task$f, task$Tt, task$replica)
 	return(file_name)
 }
 
@@ -111,39 +134,138 @@ run_task <- function(task) {
 	file_name  <- task_file_name(task)
 	file_star_name <- task_star_file_name(task)
 
+	
 	# Checkpoint: skip the task if it is already done
 	if (file.exists(file_name)) {
 		result = readRDS(file_name) #
 	} else {
 		
 		# Load the data
-		file_name <- sprintf("%s_%d_%d.rds", f, Tt, replica)
-		data <- readRDS(file_name)
+		data <- readRDS(data_file_name(task))
 		y <- data$y
 		
 		# Run the task
 		set.seed(seed)
 		
-		execution_time <- system.time({
-			resultado <- switch(method,
-								"mh_cw"          = sample_mh_cw(y, priors, n_iter = 5000, burnin = 1000),
-								"mh_montoril"    = sample_mh_montoril(y, priors, n_iter = 5000, burnin = 1000),
-								"pg_apf"         = sample_pg_apf(y, priors, n_iter = 5000, burnin = 1000, n_particulas = 200),
-								"sir_collapsed"  = sample_sir_collapsed(y, priors, n_iter = 5000, burnin = 1000),
-								"sir_laplace"    = sample_sir_laplace(y, priors, n_iter = 5000, burnin = 1000),
-								"stan"           = stan_sample(modelo_stan, y, N = 5000, burnin = 1000, priors),
-								stop(sprintf("Metodo desconhecido: %s", metodo))
+		if (method == 'stan') {
+			# Load or compile the model
+			if (file.exists("../cache/poisson_ltdm.rds")) {
+				model <- readRDS("../cache/poisson_ltdm.rds")
+				printf("Model loaded")
+			} else {
+				printf("Building the model")
+				file <- "../PoissonLTDM/inst/stan/poisson_ltdm.stan"
+				model <- rstan::stan_model(file = file, model_name = "PoissonLTDM")
+				saveRDS(model, file = "../cache/poisson_ltdm.rds")
+			}
+		}
+		
+		execution_bench <- system.time({
+			res <- switch(method,
+						  
+				"amh_cw" = sample_amh_cw(y, N, burnin, varsigma2_scal, ac_ref,
+										 mu_01, sigma2_01, mu_02, sigma2_02,
+										 nu_01, eta_01, nu_02, eta_02,
+										 W1, W2, theta_01, theta_02, theta1, theta2),
+								
+				"amh_montoril" = sample_amh_montoril(y, N, burnin, varsigma2_scal, ac_ref,
+												    mu_01, sigma2_01, mu_02, sigma2_02,
+												    nu_01, eta_01, nu_02, eta_02,
+												    W1, W2, theta_01, theta_02, theta1, theta2),
+								
+				"pg_apf" = sample_pg_apf(y, N, burnin, K,
+										 mu_01, sigma2_01, mu_02, sigma2_02,
+										 nu_01, eta_01, nu_02, eta_02,
+										 W1, W2, theta_01, theta_02, theta1, theta2),
+				
+				"sir_laplace" = sample_sir_laplace(y, N, burnin, M_is, M_irls_max, tol,
+												   mu_01, sigma2_01, mu_02, sigma2_02,
+												   nu_01, eta_01, nu_02, eta_02,
+												   W1, W2, theta_01, theta_02, theta1, theta2,
+												   theta1_tilde_scal),
+								
+				"sir_collapsed" = sample_sir_collapsed(y, N, burnin, R_prerun, 
+													   M_is, M_sir, M_irls_max, tol,
+													   mu_01, sigma2_01, mu_02, sigma2_02,
+													   nu_01, eta_01, nu_02, eta_02,
+													   W1, W2, theta_01, theta_02, theta1, theta2,
+													   theta1_tilde_scal),
+								
+				"stan" = sample_stan(model, y, N, burnin,
+									 mu_01, sigma2_01, mu_02, sigma2_02,
+									 nu_01, eta_01, nu_02, eta_02,
+									 W1, W2, theta_01, theta_02, theta1, theta2),
+				
+				stop(sprintf("Unknow method: %s", method))
 			)
 		})
-		elapsed_time <- execution_time[["elapsed"]]
+		elapsed_time <- execution_bench[["elapsed"]]
 		
-		# --- 3.3 calcular metricas ---
-		ess_theta1    <- calcular_ess(resultado$theta1_hist)
-		ess_W1        <- calcular_ess(resultado$W1_hist)
-		ess_W2        <- calcular_ess(resultado$W2_hist)
-		rmse_theta1   <- calcular_rmse(resultado$theta1_hist, theta1_true)
+		
+		#
+		# Extract  the results
+		#
+		
+		# Common
+		theta_01_hist = res$theta_01_hist
+		theta_02_hist = res$theta_02_hist
+		W1_hist = res$W1_hist
+		W2_hist = res$W2_hist
+		theta1_hist = res$theta1_hist
+		theta2_hist = res$theta2_hist
+		
+		# Only for amh_cw, amd_montoril and stan
+		if (method %in% c("amh_cw", "amg_montoril", "stan")) {
+			ac_hist = res$ac_hist
+		}
+		
+		if (method == "pg_apf") {
+			ess_smc <- res$ess_smc
+		}
+		
+		if (method %in% c("sir_laplace", "sir_collapsed")) {
+			ess_is        <- res$ess_is
+			itr_irls      <- res$itr_irls
+		}
+		
+		if (method == "sir_collapsed") {
+			accepted1_hist <- res$accepted1_hist
+			accepted2_hist <- res$accepted2_hist
+		}
+		
+		if (method == "stan") {
+			stan_elapsed_time <- res$elapsed_time
+		}
+		
+		#
+		# Compute the metrics
+		#
+		
+		# Effective Sample Size
+		ess_theta_01 <- compute_ess(theta_01_hist[-(1:burnin)])
+		ess_theta_01 <- compute_ess(theta_01_hist[-(1:burnin)])
+		
+		ess_W1 <- compute_ess(w1_hist[-(1:burnin)])
+		ess_W2 <- compute_ess(w2_hist[-(1:burnin)])
+		
+		ess_theta1 <- compute_ess(theta1_hist[-(1:burnin), ])
+		ess_theta2 <- compute_ess(theta1_hist[-(1:burnin), ])
+		
+		
+		# Effective Sample Size per second
+		
+		
+		# Geweke diagnostic
+		
+		
+		
+		
+		# 
+		rmse_theta1   <- calcular_rmse(restheta1_hist, theta1_true)
 		cobertura     <- calcular_cobertura(resultado$theta1_hist, theta1_true)
 		geweke_z      <- geweke_agregado(resultado)
+		
+		
 		
 		# --- 3.4 montar linha de resultado (data.frame de 1 linha) ---
 		linha_resultado <- data.frame(
@@ -168,11 +290,11 @@ run_task <- function(task) {
 		# Level two for star tasks
 		if (task$star) {
 			saveRDS(list(
-				theta1_hist = resultado$theta1_hist,
-				theta2_hist = resultado$theta2_hist,
-				W1_hist     = resultado$W1_hist,
-				W2_hist     = resultado$W2_hist
-			), file = arquivo_cadeia)
+				theta1_hist = theta1_hist,
+				theta2_hist = theta2_hist,
+				W1_hist     = W1_hist,
+				W2_hist     = W2_hist
+			), file = file_name)
 		}
 		
 		result=linha_resultado

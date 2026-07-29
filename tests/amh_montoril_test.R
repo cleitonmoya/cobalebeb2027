@@ -1,8 +1,8 @@
 # Change de directory to the same of the current file
 setwd(dirname(normalizePath(sys.frames()[[1]]$ofile)))
 
+library(coda)
 
-rm(list = ls())     # clear the environment
 set.seed(42)
 
 source("../PoissonLTDM/R/utils.R")
@@ -15,12 +15,17 @@ printf <- function(...) cat(paste(sprintf(...), "\n"))
 data <- readRDS("../data/simulated/quadratic_200_1.rds")
 y <- data$y
 Tt <- length(y)
+if (Tt == 200) t_obs <- c(50, 100, 150, 175)
+if (Tt == 400) t_obs <- c(75, 100, 200, 300)
+if (Tt == 800) t_obs <- c(200, 300, 500, 700)
+if (Tt == 2000) t_obs <- c(500, 1000, 1500, 1750)
+
 theta1_true <- data$theta
 
 # Simulation parameters
 N <- 10000                 # Number of steps
 burnin <- 1000             # Number of burn-in steps
-varsigma2 <- rep(0.02, Tt) # RWM variance initialization (adaptive algorithm)
+varsigma2_scal <- 0.02     # RWM variance initialization (adaptive algorithm)
 ac_ref <- 0.44             # acceptance ratio target
 
 
@@ -54,7 +59,7 @@ res <- sample_amh_montoril(
 	        y         = y,
 			N         = N,
 			burnin    = burnin,
-			varsigma2 = varsigma2,
+			varsigma2_scal = varsigma2_scal,
 			ac_ref    = ac_ref,
 			mu_01     = mu_01,
 			sigma2_01 = sigma2_01,
@@ -94,6 +99,21 @@ printf("W2 median: %.5f", median(W2_hist[-(1:burnin)]))
 loglik <- sum(dpois(y, lambda_mean, log=TRUE))
 printf("Log-likelihood: %.2f", loglik)
 
+# Effective sample size
+ess_theta01 <- effectiveSize(mcmc(theta_01_hist[-(1:burnin)]))
+ess_theta02 <- effectiveSize(mcmc(theta_02_hist[-(1:burnin)]))
+ess_w1 <- effectiveSize(mcmc(W1_hist[-(1:burnin)]))
+ess_w2 <- effectiveSize(mcmc(W2_hist[-(1:burnin)]))
+ess_theta1 <- effectiveSize(mcmc(theta1_hist[-(1:burnin),]))
+ess_theta2 <- effectiveSize(mcmc(theta2_hist[-(1:burnin),]))
+printf("Effective Sample Size:")
+printf("\ttheta_01: %.2f", ess_theta01)
+printf("\ttheta_02: %.2f", ess_theta02)
+printf("\tW1: %.0f", ess_w1)
+printf("\tW2: %.0f", ess_w2)
+printf("\ttheta1 (mean): %.2f", mean(ess_theta1))
+printf("\ttheta2 (mean): %.2f", mean(ess_theta2))
+
 
 # y, theta1_true, theta1_mean ####
 x <- 1:Tt
@@ -112,6 +132,21 @@ plot(x, theta2_mean, type="l", col="red", lwd=2,
 	 xlab="t", ylab="", main="theta_t2")
 legend("topright", legend=expression(hat(theta)[t2]), col="red", lwd=2, bty="n")
 
+# Traceplots for theta_t1 ####
+par(mfrow = c(2, 2))
+for (t in t_obs) {
+	plot(theta1_hist[, t], type="l", main=bquote(theta[.(t)*","*1]), xlab="", ylab="")
+	abline(v=burnin, col="red")
+}
+
+
+# Traceplots for theta_t2 ####
+par(mfrow = c(2, 2))
+for (t in t_obs) {
+	plot(theta2_hist[, t], type="l", main=bquote(theta[.(t)*","*1]), xlab="", ylab="")
+	abline(v=burnin, col="red")
+}
+
 
 # Traceplot of mean acceptance ratio of theta_t1 (over t) ####
 par(mfrow = c(1, 1), mar = c(4, 4, 2, 2), cex=0.8) # bottom left, top, right
@@ -119,3 +154,4 @@ plot(Rfast::rowmeans(ac_hist), type="l", xlab="n", ylab="ratio",
 	 main=expression("Acceptance ratio of " * theta[t*1] * " (mean over t)"))
 abline(h=ac_ref, col="blue", lty=2)
 abline(v=burnin, col="red")
+

@@ -14,7 +14,8 @@ log_p_yt <- function(yt, theta_t1) {
 	return(res)
 }
 
-# Used in: mh_cw, mh_montoril, pg_apf, sir_laplace, sir_collapsed
+
+# Used in: mh_montoril
 gibbs_sample_theta01 <- function(mu_01, sigma2_01, theta_11, theta_02, W1) {
 	sigma2_01_bar <- (1/sigma2_01 + 1/W1)^(-1)
 	mu_01_bar <- sigma2_01_bar*(mu_01/sigma2_01 + (theta_11 - theta_02)/W1)
@@ -23,19 +24,7 @@ gibbs_sample_theta01 <- function(mu_01, sigma2_01, theta_11, theta_02, W1) {
 }
 
 
-# Used in: mh_cw, mh_montoril, pg_apf, sir_laplace, sir_collapsed
-gibbs_sample_theta02 <- function(mu_02, sigma2_02, theta_01, theta_11,
-								 theta_12, W1, W2) {
-	
-	sigma2_02_bar <- (1/sigma2_02 + 1/W1 + 1/W2)^(-1)
-	mu_02_bar <- sigma2_02_bar*((theta_11 - theta_01)/W1 +
-									theta_12/W2 + mu_02/sigma2_02)
-	theta_02 <- rnorm(1, mean=mu_02_bar, sd=sqrt(sigma2_02_bar))
-	return(theta_02)
-}
-
-
-# Used in: mh_cw, mh_montoril, pg_apf, sir_laplace, sir_collapsed
+# Used in: mh_montoril, pg_apf, sir_laplace, sir_collapsed
 gibbs_sample_phi1 <- function(nu_01, eta_01, theta_01, theta1, theta_02, theta2, Tt) {
 	nu_01_bar <- nu_01 + Tt/2
 	dif1 <- theta1 - c(theta_01, theta1[-Tt])
@@ -46,7 +35,7 @@ gibbs_sample_phi1 <- function(nu_01, eta_01, theta_01, theta1, theta_02, theta2,
 }
 
 
-# Used in: mh_cw, mh_montoril, pg_apf, sir_laplace, sir_collapsed
+# Used in: mh_montoril, pg_apf, sir_laplace, sir_collapsed
 gibbs_sample_phi2 <- function(nu_02, eta_02, theta_02, theta2, Tt) {
 	nu_02_bar <- nu_02 + Tt/2
 	diffs2 <- theta2 - c(theta_02, theta2[-Tt])
@@ -159,27 +148,50 @@ cwmh_sample_theta1 <- function(y, theta_01, theta_02,
 	return(list(theta1 = theta1, ac = ac))
 }	
 
-# Used in: make_chan_theta2_sampler, make_chan_theta1_smoother, make_chan_theta2_smoother
-chan_build_static_objects <- function(Tt) {
+
+# Used in: chan_build_static_objects, chan_build_static_objects_ext
+# Shared low-level builder for the Chan sparse chain (RW1) precision structure.
+# first_node_order: degree of the first node of the n-node chain
+#   2: ANCHORED chain of n free nodes, with an externally fixed predecessor
+#      (the original, T-dimensional blocks - theta_01/theta_02 held fixed)
+#   1: FREE/unanchored chain of n nodes (pure random walk skeleton), used by
+#      the extended, (T+1)-dimensional joint blocks (theta_01/theta_02 folded
+#      in as node "0" of the chain itself)
+# Note: c(2, rep(2,n-2), 1) == c(rep(2,n-1), 1), so first_node_order=2
+# reproduces exactly the original (pre-extension) diagonal pattern.
+chan_build_chain <- function(n, first_node_order) {
 	
 	# FIXED SPARSE STRUCTURES FOR CHAN METHOD ####
 	# Base for the prior Precision Matrix K
-	sub_diag_base <- rep(-1, Tt-1)
-	main_diag_base <- c(rep(2, Tt-1), 1)
-	K0 <- Matrix::bandSparse(n=Tt, k=c(0, -1),
-					 diagonals=list(main_diag_base, sub_diag_base),
-					 symmetric = TRUE)
+	sub_diag_base <- rep(-1, n-1)
+	main_diag_base <- c(first_node_order, rep(2, n-2), 1)
+	
+	# The unanchored/free chain (first_node_order=1) is singular on its own
+	# (a pure RW skeleton has a free translation direction), so the initial
+	# K0/Cholesky() call below needs a positive-definite placeholder
+	# (main_diag_base + 1) just to extract the sparsity pattern; the real
+	# (always PD, thanks to the prior + data terms added on top) values are
+	# always filled in via update() before actual use, using main_diag_base
+	# (without the placeholder) - see make_chan_theta1_smoother_ext/
+	# make_chan_theta2_smoother_ext. The anchored chain (first_node_order=2)
+	# is already PD as-is, so it keeps the exact main_diag_base: unlike the
+	# extended blocks, its Ch0_factor is read directly (never update()'d) by
+	# chan_log_det_K0, so K0 must equal the true precision matrix there.
+	symbolic_diag <- if (first_node_order == 1) main_diag_base + 1 else main_diag_base
+	K0 <- Matrix::bandSparse(n=n, k=c(0, -1),
+							 diagonals=list(symbolic_diag, sub_diag_base),
+							 symmetric = TRUE)
 	# diagonal mask
 	# @x: slot of the Sparce matrix (S4 object) that contains the non-zero values
-	diag_pattern <- Matrix::bandSparse(n=Tt, k=c(0, -1),
-							   diagonals=list(rep(TRUE, Tt), rep(FALSE, Tt-1)),
-							   symmetric=TRUE)
+	diag_pattern <- Matrix::bandSparse(n=n, k=c(0, -1),
+									   diagonals=list(rep(TRUE, n), rep(FALSE, n-1)),
+									   symmetric=TRUE)
 	idx_diag <- which(diag_pattern@x) # index of subpattern@x which is non-zero
 	
 	# subdiagonal mask
-	sub_pattern <- Matrix::bandSparse(n=Tt, k=c(0, -1),
-							  diagonals=list(rep(FALSE, Tt), rep(TRUE, Tt-1)),
-							  symmetric=TRUE)
+	sub_pattern <- Matrix::bandSparse(n=n, k=c(0, -1),
+									  diagonals=list(rep(FALSE, n), rep(TRUE, n-1)),
+									  symmetric=TRUE)
 	idx_sub <- which(sub_pattern@x)
 	
 	# Initial symbolic Cholesky factor
@@ -194,6 +206,24 @@ chan_build_static_objects <- function(Tt) {
 		idx_sub = idx_sub))
 }
 
+
+# Used in: sampler_sir_collapsed's make_chan_theta2_smoother (W2 marginal
+# likelihood, theta_02 held fixed) - ANCHORED, T-dimensional block: T free
+# nodes with an externally fixed predecessor (theta_01 or theta_02 held fixed)
+chan_build_static_objects <- function(Tt) {
+	chan_build_chain(Tt, first_node_order=2)
+}
+
+# Used in: make_chan_theta2_smoother_ext, make_chan_theta1_smoother_ext
+# Extended, (T+1)-dimensional block: theta_01 (resp. theta_02) is folded in as
+# node "0" of the chain, so the WHOLE chain (T+1 nodes) is FREE/unanchored
+# (pure random walk skeleton) - node 0's own prior and cross-block coupling
+# terms are added on top of this skeleton (see make_chan_theta1_smoother_ext/
+# make_chan_theta2_smoother_ext)
+chan_build_static_objects_ext <- function(Ttp1) {
+	chan_build_chain(Ttp1, first_node_order=1)
+}
+
 # Used in: sir_collapsed
 # log|K0| (constant, precomputed once - used in the exact W2 marginal likelihood)
 chan_log_det_K0 <- function(Tt) {
@@ -202,108 +232,91 @@ chan_log_det_K0 <- function(Tt) {
 	return(log_det_K0)
 }
 
-# Used in: mh_montoril, pg_apf, sir_laplace
-# Sample theta2 using the Chan Method (conjugated Normal)
-make_chan_theta2_sampler <- function(Tt) {
+
+
+# Used in: sampler_amh_montoril, sampler_pg_apf, sampler_sir_laplace, sampler_sir_collapsed
+# Sample (theta_02, theta2) JOINTLY via the extended, (T+1)-dimensional Chan
+# block: theta_02 is folded in as node "0" of the chain. theta_02's own
+# diagonal entry combines its Normal prior (1/sigma2_02) with the phi1
+# contribution coming from theta1[1] = theta_01 + theta_02 + omega_1 (the
+# channel into the OTHER extended block, theta1). Exact (no Poisson
+# likelihood involved) - build the block here, then draw from it with
+# chan_sample_from_build(build, Ttp1).
+make_chan_theta2_smoother_ext <- function(Ttp1) {
 	
-	res <- chan_build_static_objects(Tt)
+	res <- chan_build_static_objects_ext(Ttp1)
 	P2_matrix      <- res$K0
 	Ch02_factor    <- res$Ch0_factor
-	main_diag_base <- res$main_diag_base
-	sub_diag_base  <- res$sub_diag_base
-	idx_diag       <- res$idx_diag
-	idx_sub        <- res$idx_sub
+	main_diag_rw   <- res$main_diag_base
+	idx_diag_e     <- res$idx_diag
+	idx_sub_e      <- res$idx_sub
+	Tt <- Ttp1 - 1
 	
-	chan_sample_theta2 <- function(theta1, phi1, phi2, theta_02, Tt) {
-		
+	chan_smoothing_theta2 <- function(theta1, phi1, phi2, mu_02, sigma2_02, theta_01) {
 		z <- diff(theta1)   # z_t = theta1[t+1] - theta1[t], t=1,...,T-1
 		
-		diag_obs <- c(rep(phi1, Tt-1), 0)
-		P2_matrix@x[idx_diag] <<- (main_diag_base*phi2) + diag_obs
-		P2_matrix@x[idx_sub]  <<- -phi2
+		extra_diag <- c(1/sigma2_02 + phi1, rep(phi1, Tt-1), 0)
+		P2_matrix@x[idx_diag_e] <<- (main_diag_rw*phi2) + extra_diag
+		P2_matrix@x[idx_sub_e]  <<- -phi2
 		
 		Ch2_factor <- Matrix::update(Ch02_factor, P2_matrix)
 		
-		b <- numeric(Tt)
-		b[1:(Tt-1)] <- z * phi1
-		b[1] <- b[1] + theta_02 * phi2
+		b <- numeric(Ttp1)
+		b[1] <- mu_02/sigma2_02 + phi1*(theta1[1] - theta_01)
+		b[2:Tt] <- z*phi1
+		b[Ttp1] <- 0
 		
 		theta2_hat <- as.numeric(Matrix::solve(Ch2_factor, b, system="A"))
-		d <- Matrix::diag(Ch2_factor)
-		u <- rnorm(Tt)
-		w <- u/sqrt(d)
-		x <- as.vector(Matrix::solve(Ch2_factor, w, system="Lt"))
-		
-		return(theta2_hat + x)
+		return(list(theta_hat=theta2_hat, ch=Ch2_factor, z=z))
 	}
 	
-	return(chan_sample_theta2)
+	return(chan_smoothing_theta2)
 }
 
-# Used in: sir_laplace, sir_collapsed
-make_chan_theta1_smoother <- function(Tt) {
+# Used in: sampler_sir_laplace, sampler_sir_collapsed
+# Laplace/IRLS approximation for (theta_01, theta1) JOINTLY via the extended,
+# (T+1)-dimensional Chan block: theta_01 is folded in as node "0" of the
+# chain. theta_01 needs no linearization itself (no likelihood) - only its
+# exact Gaussian prior and the exact process link into theta1[1], both
+# already captured by main_diag_rw*phi1 + extra_diag (no extra "+phi1" term
+# at node 0, unlike theta_02, since theta_01 has no external channel into
+# another block).
+make_chan_theta1_smoother_ext <- function(Ttp1) {
 	
-	res <- chan_build_static_objects(Tt)
+	res <- chan_build_static_objects_ext(Ttp1)
 	P1_matrix      <- res$K0
 	Ch01_factor    <- res$Ch0_factor
-	main_diag_base <- res$main_diag_base
-	sub_diag_base  <- res$sub_diag_base
-	idx_diag       <- res$idx_diag
-	idx_sub        <- res$idx_sub
+	main_diag_rw   <- res$main_diag_base
+	idx_diag_e     <- res$idx_diag
+	idx_sub_e      <- res$idx_sub
+	Tt <- Ttp1 - 1
 	
-	chan_smoothing_theta1 <- function(y, phi_V, phi1, theta_01, theta_02, theta2) {
-		Tt <- length(y)
-		P1_matrix@x[idx_diag] <- (main_diag_base * phi1) + phi_V
-		P1_matrix@x[idx_sub]  <- -phi1
+	chan_smoothing_theta1 <- function(z_t, phi_V, phi1, mu_01, sigma2_01, theta_02, theta2) {
+		extra_diag <- c(1/sigma2_01, phi_V)
+		P1_matrix@x[idx_diag_e] <<- (main_diag_rw*phi1) + extra_diag
+		P1_matrix@x[idx_sub_e]  <<- -phi1
+		
 		Ch1_factor <- Matrix::update(Ch01_factor, P1_matrix)
 		
-		b <- y * phi_V
-		Hb_theta2 <- numeric(Tt)
-		Hb_theta2[1] <- -theta2[1]
-		Hb_theta2[2:(Tt-1)] <- theta2[1:(Tt-2)] - theta2[2:(Tt-1)]
-		Hb_theta2[Tt] <- theta2[Tt-1]
-		b <- b + phi1*Hb_theta2
-		b[1] <- b[1] + phi1*(theta_01 + theta_02)
+		RHS_ext <- c(theta_02, theta2[-Tt])
+		Hb_ext <- numeric(Ttp1)
+		Hb_ext[1] <- -RHS_ext[1]
+		Hb_ext[2:Tt] <- RHS_ext[1:(Tt-1)] - RHS_ext[2:Tt]
+		Hb_ext[Ttp1] <- RHS_ext[Tt]
+		b <- c(mu_01/sigma2_01, phi_V*z_t) + phi1*Hb_ext
 		
 		theta1_hat <- as.numeric(Matrix::solve(Ch1_factor, b, system="A"))
-		list(theta1_hat=theta1_hat, ch=Ch1_factor)
+		return(list(theta1_hat=theta1_hat, ch=Ch1_factor))
 	}
 	
 	return(chan_smoothing_theta1)
 }
 
 
-# Used in: sir_collapsed
-make_chan_theta2_smoother <- function(Tt) {
-	
-	res <- chan_build_static_objects(Tt)
-	P2_matrix      <- res$K0
-	Ch02_factor    <- res$Ch0_factor
-	main_diag_base <- res$main_diag_base
-	sub_diag_base  <- res$sub_diag_base
-	idx_diag       <- res$idx_diag
-	idx_sub        <- res$idx_sub
-	
-	chan_smoothing_theta2 <- function(theta1, phi1, phi2, theta_02) {
-		z <- diff(theta1)   # z_t = theta1[t+1] - theta1[t], t=1,...,T-1
-		
-		diag_obs <- c(rep(phi1, Tt-1), 0)
-		P2_matrix@x[idx_diag] <- (main_diag_base*phi2) + diag_obs
-		P2_matrix@x[idx_sub]  <- -phi2
-		
-		Ch2_factor <- Matrix::update(Ch02_factor, P2_matrix)
-		
-		b <- numeric(Tt)
-		b[1:(Tt-1)] <- z * phi1
-		b[1] <- b[1] + theta_02 * phi2
-		
-		theta2_hat <- as.numeric(Matrix::solve(Ch2_factor, b, system="A"))
-		list(theta2_hat = theta2_hat, ch = Ch2_factor, z = z)
-	}
-}
 
-# Used in: sir_collapsed
-# It can be used with theta1 or theta2
+
+# Used in: sampler_amh_montoril, sampler_pg_apf, sampler_sir_laplace, sampler_sir_collapsed
+# It can be used with theta1 or theta2, ANCHORED (Tt) or extended (Ttp1) builds
 chan_sample_from_build <- function(build, Tt) {
 	
 	ch <- build$ch

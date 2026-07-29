@@ -18,15 +18,17 @@
 # Author: Cleiton Moya de Almeida
 
 
-sample_amh_montoril <- function(y, N, burnin, varsigma2, ac_ref,
+sample_amh_montoril <- function(y, N, burnin, varsigma2_scal, ac_ref,
                          mu_01, sigma2_01, mu_02, sigma2_02,
                          nu_01, eta_01, nu_02, eta_02,
                          W1, W2, theta_01, theta_02, theta1, theta2){
 
     Tt <- length(y)
+    Ttp1 <- Tt + 1
+    varsigma2 <- rep(varsigma2_scal, Tt)
 
     # Prepare Chan static objects
-    chan_sample_theta2 <- make_chan_theta2_sampler(Tt)
+    chan_smoothing_theta2 <- make_chan_theta2_smoother_ext(Ttp1)
 
     # Auxiliary vectors and matrix to store the results
     theta1_hist <- matrix(nrow=N, ncol=Tt)
@@ -43,10 +45,6 @@ sample_amh_montoril <- function(y, N, burnin, varsigma2, ac_ref,
         # Sample theta_01 (conjugated Normal)
         theta_01 <- gibbs_sample_theta01(mu_01, sigma2_01, theta1[1],
                                          theta_02, W1)
-
-        # Sample theta_02 (conjugated Normal)
-        theta_02 <- gibbs_sample_theta02(mu_02, sigma2_02, theta_01, theta1[1],
-                                         theta2[1], W1, W2)
 
         # Sample phi1 (conjugated Gamma)
         phi1 <- gibbs_sample_phi1(nu_01, eta_01, theta_01, theta1,
@@ -68,8 +66,11 @@ sample_amh_montoril <- function(y, N, burnin, varsigma2, ac_ref,
         ls <- log(varsigma2)/2 + delta*(ac_hist[n,] - ac_ref)
         varsigma2 <- exp(2*ls)
         
-        # Sample theta2 (Chan Method)
-        theta2 <- chan_sample_theta2(theta1, phi1, phi2, theta_02, Tt)
+        # (theta_02, theta2) jointly via extended block (Chan Method)
+        build2 <- chan_smoothing_theta2(theta1, phi1, phi2, mu_02, sigma2_02, theta_01)
+        draw2  <- chan_sample_from_build(build2, Ttp1)
+        theta_02 <- draw2[1]
+        theta2   <- draw2[-1]
 
         # Store the sampled values
         theta_01_hist[n] <- theta_01

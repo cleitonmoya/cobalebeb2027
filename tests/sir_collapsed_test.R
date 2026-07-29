@@ -13,7 +13,7 @@ source("../PoissonLTDM/R/sampler_sir_collapsed.R")
 printf <- function(...) cat(paste(sprintf(...), "\n"))
 
 # Load the data
-data <- readRDS("../data/poisson_pol2_200.rds")
+data <- readRDS("../data/simulated/quadratic_200_1.rds")
 y <- data$y
 Tt <- length(y)
 theta1_true <- data$theta
@@ -51,7 +51,7 @@ theta_01 <- 0
 theta_02 <- 0
 theta1 <- numeric(Tt)
 theta2 <- numeric(Tt)
-theta1_tilde <- numeric(Tt)
+theta1_tilde_scal <- 0
 
 res <- sample_sir_collapsed(
 	        y            = y,
@@ -76,7 +76,7 @@ res <- sample_sir_collapsed(
 			theta_02     = theta_02,
 			theta1       = theta1,
 			theta2       = theta2,
-			theta1_tilde = theta1_tilde)
+			theta1_tilde_scal = theta1_tilde_scal)
 
 
 theta_01_hist  <- res$theta_01_hist

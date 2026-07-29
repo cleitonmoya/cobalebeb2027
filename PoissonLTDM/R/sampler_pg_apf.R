@@ -30,9 +30,10 @@ sample_pg_apf <- function(y, N, burnin, K,
                           W1, W2, theta_01, theta_02, theta1, theta2) {
   
   Tt <- length(y)
+  Ttp1 <- Tt + 1
   
   # Prepare Chan static objects
-  chan_sample_theta2 <- make_chan_theta2_sampler(Tt)
+  chan_smoothing_theta2 <- make_chan_theta2_smoother_ext(Ttp1)
   
   # Auxiliary variables
   W1_hist <- numeric(N)
@@ -46,14 +47,6 @@ sample_pg_apf <- function(y, N, burnin, K,
   # Gibbs sampling
   for (n in 1:N) {
 
-    # Sample theta_01 (conjugated Normal)
-    theta_01 <- gibbs_sample_theta01(mu_01, sigma2_01, theta1[1],
-                                     theta_02, W1)
-    
-    # Sample theta_02 (conjugated Normal)
-    theta_02 <- gibbs_sample_theta02(mu_02, sigma2_02, theta_01, theta1[1],
-                                     theta2[1], W1, W2)
-    
     # Sample phi1 (conjugated Gamma)
     phi1 <- gibbs_sample_phi1(nu_01, eta_01, theta_01, theta1,
                               theta_02, theta2, Tt)
@@ -66,16 +59,36 @@ sample_pg_apf <- function(y, N, burnin, K,
     
     
     #
-    # Conditional SMC for theta1
+    # Conditional SMC for theta1, AUGMENTED with a t=0 layer so that theta_01
+    # is sampled JOINTLY with theta1 via backward sampling (instead of a
+    # separate conjugate Normal draw)
     #
-    theta_1_k <- matrix(0, Tt, K)
+    theta_1_k   <- matrix(0, Tt, K)
     log_w_tilde <- matrix(0, Tt, K)
     
+    # t = 0
+    theta_0_k <- rnorm(K, mean = mu_01, sd = sqrt(sigma2_01))
+    theta_0_k[K] <- theta_01   # reference path
+    log_w_tilde_0 <- rep(-log(K), K)  # no likelihood at t = 0 (uniform weights)
+    
     # t = 1
-    theta_1_k[1, ] <- rnorm(K, mean = theta_01 + theta_02, sd = sd_W1)
+    # Predictor (auxiliary variable)
+    theta_hat_11_k <- theta_0_k + theta_02
+    
+    # Auxiliary weights
+    log_lambda_1_k <- y[1] * theta_hat_11_k - exp(theta_hat_11_k)
+    
+    # First stage resampling
+    log_aux_1 <- log_w_tilde_0 + log_lambda_1_k
+    A_1 <- sample(1:K, K, replace = TRUE, prob = exp(log_aux_1 - max(log_aux_1)))
+    A_1[K] <- K   # reference path
+    
+    # Propagation
+    theta_1_k[1, ] <- rnorm(K, mean = theta_0_k[A_1] + theta_02, sd = sd_W1)
     theta_1_k[1, K] <- theta1[1]
     
-    log_w_1 <- log_p_yt(y[1], theta_1_k[1, ])
+    # Updated weights
+    log_w_1 <- log_p_yt(y[1], theta_1_k[1, ]) - log_lambda_1_k[A_1]
     log_w_tilde[1, ] <- log_w_1 - logsumexp(log_w_1) # normalizing
     
     # t = 2, ..., T
@@ -123,8 +136,25 @@ sample_pg_apf <- function(y, N, burnin, K,
       theta1[t] <- theta_1_k[t, b]
     }
     
-    # Sample theta2 - Chan method
-    theta2 <- chan_sample_theta2(theta1, phi1, phi2, theta_02, Tt)
+    # backward sampling for theta_01
+    # Backward weights: w_0^k * N(theta1[1] | theta_0^k + theta_02, W1)
+    log_bw_0 <- log_w_tilde_0 +
+      dnorm(theta1[1],
+            mean = theta_0_k + theta_02,
+            sd = sd_W1,
+            log = TRUE
+      )
+    log_bw_0 <- log_bw_0 - max(log_bw_0)
+    bw_0 <- exp(log_bw_0)
+    bw_0 <- bw_0 / sum(bw_0)
+    b_0 <- sample(1:K, 1, prob = bw_0)
+    theta_01 <- theta_0_k[b_0]
+    
+    # (theta_02, theta2) jointly via extended block (Chan Method)
+    build2 <- chan_smoothing_theta2(theta1, phi1, phi2, mu_02, sigma2_02, theta_01)
+    draw2  <- chan_sample_from_build(build2, Ttp1)
+    theta_02 <- draw2[1]
+    theta2   <- draw2[-1]
     
     # Store the results
     theta_01_hist[n] <- theta_01

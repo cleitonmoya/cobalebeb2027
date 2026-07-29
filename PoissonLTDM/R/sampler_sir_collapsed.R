@@ -6,27 +6,37 @@
 #   - Pre-run: standard Gibbs (R_prerun iterations) to collect phi1 and phi2 samples
 #   - CE calibration: fit Gamma(c_hat, d_hat) proposals for both phi1 and phi2
 #   - Gibbs sampling:
-#       * theta_02, theta_01: Conjugated Normal
-#       * W1: Collapsed MH with CE proposal marginalizing theta1;
-#             Integrated likelihod: IS with Laplace approx.
-#       * W2: Collapsed MH with CE proposal marginalizing theta2;
-#             Integrate likelihood: Gaussian    
-#       * theta1: SIR + Chan sampler
-#       * theta2: Chan sampler
+#       * (theta_01, theta1): EXTENDED-state joint block ((T+1)-dimensional),
+#         sampled together via chan_smoothing_theta1/chan_sample_from_build -
+#         still needs SIR (the Poisson likelihood on theta1[1..T] makes it
+#         only a Laplace/IRLS approximation; theta_01 itself needs no
+#         approximation, no likelihood on it).
+#       * (theta_02, theta2): EXTENDED-state joint block ((T+1)-dimensional),
+#         sampled together via chan_smoothing_theta2_ext/chan_sample_from_build -
+#         exact, no SIR needed (no Poisson likelihood involved).
+#       * W1: Collapsed MH with CE proposal marginalizing (theta_01, theta1)
+#             JOINTLY; Integrated likelihod: IS with Laplace approx.
+#       * W2: Collapsed MH with CE proposal marginalizing theta2, theta_02
+#             held FIXED (ANCHORED, T-dimensional block - mathematically
+#             distinct from the joint theta_02/theta2 block above, see
+#             chan_smoothing_theta2_w2lik); Integrate likelihood: Gaussian
 #
 # Author: Cleiton Moya de Almeida
 
 
-# IRLS: build Laplace approximation around theta1_tilde
-run_irls <- function(theta1_tilde, theta2, theta_01, theta_02, phi1,
-                     y, tol, M_irls_max, chan_smoothing_theta1) {
+# IRLS: build the Laplace approximation for (theta_01, theta1) JOINTLY via the
+# extended block. theta_01 itself needs no linearization (no likelihood) -
+# only its exact Gaussian prior and the exact process link into theta1[1].
+run_irls <- function(theta1_tilde, theta2, theta_02, phi1,
+                     y, tol, M_irls_max, chan_smoothing_theta1,
+                     mu_01, sigma2_01) {
     for (j in 1:M_irls_max) {
         f_t   <- exp(-theta1_tilde)
         phi_V <- 1 / f_t
         z_t   <- theta1_tilde + f_t * y - 1   # Poisson pseudo-observation
 
-        theta1_build <- chan_smoothing_theta1(z_t, phi_V, phi1, theta_01, theta_02, theta2)
-        theta1_tilde_new <- theta1_build$theta1_hat
+        theta1_build <- chan_smoothing_theta1(z_t, phi_V, phi1, mu_01, sigma2_01, theta_02, theta2)
+        theta1_tilde_new <- theta1_build$theta1_hat[-1]   # drop node 0 (theta_01)
         if (any(!is.finite(theta1_tilde_new))) break
 
         if (max(abs(theta1_tilde_new - theta1_tilde)) < tol) {
@@ -44,10 +54,14 @@ run_irls <- function(theta1_tilde, theta2, theta_01, theta_02, phi1,
 }
 
 
-# IS estimator of log p(y | phi1, theta2)  [integrated over theta1]
-# Approximate: the Poisson likelihood makes p(theta1|y,phi1,theta2) non-Gaussian,
-# so this uses IS around the Laplace mode (computed via IRLS).
-is_log_lik <- function(irls_res, y, phi1, theta2, theta_01, theta_02, M_is) {
+# IS estimator of log p(y | phi1, theta2) [integrated over (theta_01, theta1)
+# JOINTLY]. Approximate: the Poisson likelihood makes p(theta1|y,phi1,theta2)
+# non-Gaussian. theta_01 itself needs no approximation (no likelihood), but
+# once the proposal q integrates it jointly (via the extended block), the
+# target here must integrate it jointly too - holding it fixed would break
+# the target/proposal cancellation, not just lose efficiency.
+is_log_lik <- function(irls_res, y, phi1, theta2, theta_02, M_is,
+                       Tt, Ttp1, mu_01, sigma2_01) {
     
     theta1_build <- irls_res$theta1_build
     eta_hat <- theta1_build$theta1_hat
@@ -57,25 +71,28 @@ is_log_lik <- function(irls_res, y, phi1, theta2, theta_01, theta_02, M_is) {
 
     log_det_H <- 2 * as.numeric(Matrix::determinant(ch, logarithm = TRUE)$modulus)
     th_lag2_fixed <- c(theta_02, theta2[-Tt])
-    log_norm_H <- -Tt / 2 * log(2 * pi) + 0.5 * log_det_H
+    log_norm_H <- -Ttp1 / 2 * log(2 * pi) + 0.5 * log_det_H
 
     log_w <- numeric(M_is)
-    u_mat <- matrix(rnorm(M_is * Tt), nrow = M_is)
+    u_mat <- matrix(rnorm(M_is * Ttp1), nrow = M_is)
     d_ch  <- Matrix::diag(ch)
 
     for (i in 1:M_is) {
         u <- u_mat[i, ]
         w <- u / sqrt(d_ch)
         x <- as.vector(Matrix::solve(ch, w, system = "Lt"))
-        th <- eta_hat + x
+        draw_i <- eta_hat + x
+        theta_01_i <- draw_i[1]
+        th         <- draw_i[-1]
 
         log_py <- sum(y * th - exp(th))
-        th_lag1 <- c(theta_01, th[-Tt])
+        log_prior_01 <- -0.5 * log(2 * pi * sigma2_01) - (theta_01_i - mu_01)^2 / (2 * sigma2_01)
+        th_lag1 <- c(theta_01_i, th[-Tt])
         eps     <- th - th_lag1 - th_lag2_fixed
         log_prior_th <- -Tt / 2 * log(2 * pi * W1) - sum(eps^2) / (2 * W1)
         log_q <- log_norm_H - 0.5 * sum(u^2)
 
-        log_w[i] <- log_py + log_prior_th - log_q
+        log_w[i] <- log_py + log_prior_01 + log_prior_th - log_q
     }
 
     log_lik <- logsumexp(log_w) - log(M_is)
@@ -87,9 +104,48 @@ is_log_lik <- function(irls_res, y, phi1, theta2, theta_01, theta_02, M_is) {
 
 
 
-# EXACT integrated likelihood log p(z | phi2, phi1, theta_02) [integrated over theta2]
-# Exact: z|theta2 is Gaussian valuated via the
-# Chan sparse Cholesky factor at the conditional mode theta2_hat:
+# ANCHORED, T-dimensional Chan smoother for theta2 given theta_02 held FIXED
+# (single consumer: log_marginal_lik_w2 below, for the W2 marginal
+# likelihood - mathematically distinct from the extended, jointly-sampled
+# (theta_02, theta2) block used elsewhere in this sampler, so it is kept as
+# its own dedicated, locally-scoped factory rather than in utils.R)
+make_chan_theta2_smoother <- function(Tt) {
+	
+	res <- chan_build_static_objects(Tt)
+	P2_matrix      <- res$K0
+	Ch02_factor    <- res$Ch0_factor
+	main_diag_base <- res$main_diag_base
+	sub_diag_base  <- res$sub_diag_base
+	idx_diag       <- res$idx_diag
+	idx_sub        <- res$idx_sub
+	
+	chan_smoothing_theta2 <- function(theta1, phi1, phi2, theta_02) {
+		z <- diff(theta1)   # z_t = theta1[t+1] - theta1[t], t=1,...,T-1
+		
+		diag_obs <- c(rep(phi1, Tt-1), 0)
+		P2_matrix@x[idx_diag] <- (main_diag_base*phi2) + diag_obs
+		P2_matrix@x[idx_sub]  <- -phi2
+		
+		Ch2_factor <- Matrix::update(Ch02_factor, P2_matrix)
+		
+		b <- numeric(Tt)
+		b[1:(Tt-1)] <- z * phi1
+		b[1] <- b[1] + theta_02 * phi2
+		
+		theta2_hat <- as.numeric(Matrix::solve(Ch2_factor, b, system="A"))
+		list(theta2_hat = theta2_hat, ch = Ch2_factor, z = z)
+	}
+}
+
+
+# EXACT integrated likelihood log p(z | phi2, phi1, theta_02) [integrated over
+# theta2, theta_02 held FIXED]. Mathematically distinct from the joint
+# (theta_02, theta2) extended block used elsewhere in this sampler - the W2
+# collapsed MH needs the likelihood conditional on the CURRENT theta_02, so
+# chan_smoothing_theta2 here must be the ANCHORED, T-dimensional smoother
+# (make_chan_theta2_smoother, never the extended one). Exact: z|theta2 is
+# Gaussian evaluated via the Chan sparse Cholesky factor at the conditional
+# mode theta2_hat:
 #
 #   log p(z|phi2) = log p(z|theta2_hat) + log p(theta2_hat|phi2) - log q(theta2_hat)
 #
@@ -139,18 +195,21 @@ calibrate_ce_gamma <- function(samples) {
 }
 
 
-# Collapsed MH step for W1 (independence chain with CE proposal, approximate IS likelihood)
+# Collapsed MH step for W1 (independence chain with CE proposal, approximate
+# IS likelihood, marginalizing (theta_01, theta1) JOINTLY)
 mh_phi1_collapsed <- function(phi1_cur, log_lik1_cur, irls_cur,
                             ce1_params, nu_01, eta_01,
-                            theta2, theta_01, theta_02,
+                            theta2, theta_02,
                             theta1_tilde, y, tol, M_irls_max, M_is,
-                            chan_smoothing_theta1) {
+                            chan_smoothing_theta1, mu_01, sigma2_01, Tt, Ttp1) {
 
     phi1_prop <- rgamma(1, shape = ce1_params$shape, rate = ce1_params$rate)
 
-    irls_prop    <- run_irls(theta1_tilde, theta2, theta_01, theta_02,
-                             phi1_prop, y, tol, M_irls_max, chan_smoothing_theta1)
-    res_lik_prop <- is_log_lik(irls_prop, y, phi1_prop, theta2, theta_01, theta_02, M_is)
+    irls_prop    <- run_irls(theta1_tilde, theta2, theta_02,
+                             phi1_prop, y, tol, M_irls_max, chan_smoothing_theta1,
+                             mu_01, sigma2_01)
+    res_lik_prop <- is_log_lik(irls_prop, y, phi1_prop, theta2, theta_02, M_is,
+                               Tt, Ttp1, mu_01, sigma2_01)
     log_lik_prop <- res_lik_prop$log_lik
 
     log_prior <- function(phi) dgamma(phi, shape = nu_01, rate = eta_01, log = TRUE)
@@ -169,7 +228,8 @@ mh_phi1_collapsed <- function(phi1_cur, log_lik1_cur, irls_cur,
 }
 
 
-# Collapsed MH step for W2 (independence chain with CE proposal, EXACT likelihood)
+# Collapsed MH step for W2 (independence chain with CE proposal, EXACT
+# likelihood, theta_02 held FIXED - see log_marginal_lik_w2)
 mh_phi2_collapsed <- function(phi2_cur, log_lik2_cur, theta2_build_cur,
                             ce2_params, nu_02, eta_02,
                             theta1, phi1, theta_02,
@@ -203,8 +263,11 @@ mh_phi2_collapsed <- function(phi2_cur, log_lik2_cur, theta2_build_cur,
 }
 
 
-# Sampling Importance Resampling for theta1
-sir_theta1 <- function(irls_res, y, phi1, theta2, theta_01, theta_02, M_sir) {
+# Sampling Importance Resampling for (theta_01, theta1) JOINTLY (extended,
+# (T+1)-dimensional; corrects the Laplace/IRLS Gaussian approximation via
+# importance resampling)
+sir_theta1 <- function(irls_res, y, phi1, theta2, theta_02, M_sir,
+                       mu_01, sigma2_01, Tt, Ttp1) {
     
     eta_hat <- irls_res$theta1_build$theta1_hat
     ch <- irls_res$theta1_build$ch
@@ -212,43 +275,46 @@ sir_theta1 <- function(irls_res, y, phi1, theta2, theta_01, theta_02, M_sir) {
 
     log_det_H <- 2*as.numeric(Matrix::determinant(ch, logarithm = TRUE)$modulus)
     th_lag2_fixed <- c(theta_02, theta2[-Tt])
-    log_norm_H <- -(Tt/2)*log(2*pi) + 0.5*log_det_H
+    log_norm_H <- -(Ttp1/2)*log(2*pi) + 0.5*log_det_H
 
     log_w <- numeric(M_sir)
-    draws <- matrix(0, M_sir, Tt)
+    draws <- matrix(0, M_sir, Ttp1)
     d_ch <- Matrix::diag(ch)
 
     for (i in 1:M_sir) {
-        u <- rnorm(Tt)
+        u <- rnorm(Ttp1)
         w <- u / sqrt(d_ch)
         x <- as.vector(Matrix::solve(ch, w, system = "Lt"))
-        th <- eta_hat + x
-        draws[i, ] <- th
+        draw_i <- eta_hat + x
+        draws[i, ] <- draw_i
+        theta_01_i <- draw_i[1]
+        th         <- draw_i[-1]
 
         log_py <- sum(y * th - exp(th))
-        th_lag1 <- c(theta_01, th[-Tt])
+        log_prior_01 <- -0.5 * log(2 * pi * sigma2_01) - (theta_01_i - mu_01)^2 / (2 * sigma2_01)
+        th_lag1 <- c(theta_01_i, th[-Tt])
         eps <- th - th_lag1 - th_lag2_fixed
         log_prior_th <- -Tt / 2 * log(2 * pi * W1) - sum(eps^2) / (2 * W1)
         log_q <- log_norm_H - 0.5 * sum(u^2)
 
-        log_w[i] <- log_py + log_prior_th - log_q
+        log_w[i] <- log_py + log_prior_01 + log_prior_th - log_q
     }
 
     w_norm <- exp(log_w - logsumexp(log_w))
     ess_sir <- 1 / sum(w_norm^2)
     idx <- sample.int(M_sir, size = 1, prob = w_norm)
 
-    list(theta1 = draws[idx, ], ess = ess_sir)
+    list(theta_01 = draws[idx, 1], theta1 = draws[idx, -1], ess = ess_sir)
 }
 
 # PRE-RUN: standard Gibbs to collect phi1 and phi2 samples for CE calibration
-collapsed_prerun <- function(R_prerun, y, Tt,
-                             M_irls_max, tol,
+collapsed_prerun <- function(R_prerun, y, Tt, Ttp1,
+                             M_irls_max, tol, M_sir,
                              mu_01, sigma2_01, mu_02, sigma2_02,
                              nu_01, eta_01, nu_02, eta_02,
                              W1, W2, theta_01, theta_02, theta1, theta2, 
                              theta1_tilde,
-                             chan_smoothing_theta1, chan_smoothing_theta2) {
+                             chan_smoothing_theta1, chan_smoothing_theta2_ext) {
   
   phi1 <- 1/W1
   phi2 <- 1/W2
@@ -257,14 +323,6 @@ collapsed_prerun <- function(R_prerun, y, Tt,
   phi2_prerun <- numeric(R_prerun)
   
   for (r in 1:R_prerun) {
-    
-    # Sample theta_02 (conjugated Normal)
-    theta_02 <- gibbs_sample_theta02(mu_02, sigma2_02, theta_01, theta1[1],
-                                     theta2[1], W1, W2)
-    
-    # Sample theta_01 (conjugated Normal)
-    theta_01 <- gibbs_sample_theta01(mu_01, sigma2_01, theta1[1],
-                                     theta_02, W1)
     
     # Sample phi1 (conjugated Gamma)
     phi1 <- gibbs_sample_phi1(nu_01, eta_01, theta_01, theta1,
@@ -279,16 +337,21 @@ collapsed_prerun <- function(R_prerun, y, Tt,
     W2 <- 1/phi2
     
     
-    # Sample theta1 (IRLS + Chan)
-    irls_res <- run_irls(theta1_tilde, theta2, theta_01, theta_02,
-                         phi1, y, tol, M_irls_max, chan_smoothing_theta1)
-    
+    # (theta_01, theta1) jointly (SIR, extended)
+    irls_res <- run_irls(theta1_tilde, theta2, theta_02,
+                         phi1, y, tol, M_irls_max, chan_smoothing_theta1,
+                         mu_01, sigma2_01)
     theta1_tilde <- irls_res$theta1_tilde
-    theta1  <- chan_sample_from_build(irls_res$theta1_build, Tt)
+    res_sir <- sir_theta1(irls_res, y, phi1, theta2, theta_02, M_sir,
+                          mu_01, sigma2_01, Tt, Ttp1)
+    theta_01 <- res_sir$theta_01
+    theta1   <- res_sir$theta1
     
-    # Sample theta2 (Chan)
-    theta2_build <- chan_smoothing_theta2(theta1, phi1, phi2, theta_02)
-    theta2 <- chan_sample_from_build(theta2_build, Tt)
+    # (theta_02, theta2) jointly via extended block
+    build2 <- chan_smoothing_theta2_ext(theta1, phi1, phi2, mu_02, sigma2_02, theta_01)
+    theta2_draw <- chan_sample_from_build(build2, Ttp1)
+    theta_02 <- theta2_draw[1]
+    theta2   <- theta2_draw[-1]
   }
   
   return(list(phi1_prerun = phi1_prerun, 
@@ -308,12 +371,20 @@ sample_sir_collapsed <- function(y, N, burnin, R_prerun,
                                  mu_01, sigma2_01, mu_02, sigma2_02,
                                  nu_01, eta_01, nu_02, eta_02,
                                  W1, W2, theta_01, theta_02, theta1, theta2,
-                                 theta1_tilde) {
+                                 theta1_tilde_scal) {
   Tt <- length(y)
+  Ttp1 <- Tt + 1
+  theta1_tilde <- rep(theta1_tilde_scal, Tt)
   
   # Prepare Chan static objects
-  chan_smoothing_theta1 <- make_chan_theta1_smoother(Tt)
-  chan_smoothing_theta2 <- make_chan_theta2_smoother(Tt)
+  # (theta_01, theta1) and (theta_02, theta2): extended, (T+1)-dimensional
+  # joint blocks
+  chan_smoothing_theta1 <- make_chan_theta1_smoother_ext(Ttp1)
+  chan_smoothing_theta2_ext <- make_chan_theta2_smoother_ext(Ttp1)
+  # W2's integrated likelihood needs theta_02 held FIXED (not jointly
+  # marginalized) - a mathematically distinct computation from the joint
+  # block above, so it gets its own dedicated ANCHORED, T-dimensional smoother
+  chan_smoothing_theta2_w2lik <- make_chan_theta2_smoother(Tt)
   log_det_K0 <- chan_log_det_K0(Tt)
   
   # Auxiliary variables
@@ -330,13 +401,13 @@ sample_sir_collapsed <- function(y, N, burnin, R_prerun,
   ess_sir_hist <- numeric(N)      # SIR of theta1
   
   # Pre-run stage (to calibrate CE parameters)
-  prerun_res <- collapsed_prerun(R_prerun, y, Tt,
-                                 M_irls_max, tol,
+  prerun_res <- collapsed_prerun(R_prerun, y, Tt, Ttp1,
+                                 M_irls_max, tol, M_sir,
                                  mu_01, sigma2_01, mu_02, sigma2_02,
                                  nu_01, eta_01, nu_02, eta_02,
                                  W1, W2, theta_01, theta_02, theta1, theta2, 
                                  theta1_tilde,
-                                 chan_smoothing_theta1, chan_smoothing_theta2)
+                                 chan_smoothing_theta1, chan_smoothing_theta2_ext)
   
   # Recover pre-run parameters
   phi1_prerun  <- prerun_res$phi1_prerun
@@ -357,12 +428,13 @@ sample_sir_collapsed <- function(y, N, burnin, R_prerun,
   ce2_params <- calibrate_ce_gamma(phi2_prerun)
   
   # Integrated likelihood for W1
-  res_lik1 <- is_log_lik(irls_cur, y, phi1, theta2, theta_01, theta_02, M_is)
+  res_lik1 <- is_log_lik(irls_cur, y, phi1, theta2, theta_02, M_is,
+                         Tt, Ttp1, mu_01, sigma2_01)
   log_lik1_cur <- res_lik1$log_lik
   
   # Integrated likelihood for W2
   res_lik2 <- log_marginal_lik_w2(theta1, phi1, phi2, theta_02, 
-                                  chan_smoothing_theta2, log_det_K0)
+                                  chan_smoothing_theta2_w2lik, log_det_K0)
   log_lik2_cur <- res_lik2$log_lik
   theta2_build_cur <- res_lik2$build
   
@@ -370,26 +442,13 @@ sample_sir_collapsed <- function(y, N, burnin, R_prerun,
   # Gibbs sampling
   for (n in 1:N) {
     
-    # Sample theta_02 (conjugated Normal)
-    sigma2_02_bar <- (1 / sigma2_02 + 1 / W1 + 1 / W2)^(-1)
-    mu_02_bar <- sigma2_02_bar * ((theta1[1] - theta_01) / W1 +
-                                    theta2[1] / W2 + mu_02 / sigma2_02)
-    theta_02 <- rnorm(1, mean = mu_02_bar, sd = sqrt(sigma2_02_bar))
-    
-    
-    # Sample theta_01 (conjugated Normal)
-    sigma2_01_bar <- (1 / sigma2_01 + 1 / W1)^(-1)
-    mu_01_bar <- sigma2_01_bar * (mu_01 / sigma2_01 +
-                                    (theta1[1] - theta_02) / W1)
-    theta_01 <- rnorm(1, mean = mu_01_bar, sd = sqrt(sigma2_01_bar))
-    
-    
-    # Collapsed MH for phi1 (approximate integrated likelihood, marginalizes theta1)
+    # Collapsed MH for phi1 (approximate integrated likelihood, marginalizes
+    # (theta_01, theta1) JOINTLY)
     mh1_res <- mh_phi1_collapsed(phi1, log_lik1_cur, irls_cur,
                                  ce1_params, nu_01, eta_01,
-                                 theta2, theta_01, theta_02,
+                                 theta2, theta_02,
                                  theta1_tilde, y, tol, M_irls_max, M_is,
-                                 chan_smoothing_theta1)
+                                 chan_smoothing_theta1, mu_01, sigma2_01, Tt, Ttp1)
     
     phi1 <- mh1_res$phi1
     W1 <- 1/phi1
@@ -397,12 +456,12 @@ sample_sir_collapsed <- function(y, N, burnin, R_prerun,
     irls_cur <- mh1_res$irls_res
     
     
-    # Collapsed MH for phi2 (EXACT integrated likelihood, marginalizes theta2)
-    # Recompute log_lik2_cur first: theta_02 and phi1 both may have changed
-    # since the last time it was updated (theta_01/theta_02 sampled above,
-    # phi1 updated by the W1 MH step just now).
+    # Collapsed MH for phi2 (EXACT integrated likelihood, marginalizes
+    # theta2, theta_02 held FIXED)
+    # Recompute log_lik2_cur first: phi1 may have changed since the last time
+    # it was updated (phi1 updated by the W1 MH step just now).
     res_lik2_cur <- log_marginal_lik_w2(theta1, phi1, phi2, theta_02, 
-                                        chan_smoothing_theta2,
+                                        chan_smoothing_theta2_w2lik,
                                         log_det_K0)
     log_lik2_cur <- res_lik2_cur$log_lik
     theta2_build_cur <- res_lik2_cur$build
@@ -410,31 +469,41 @@ sample_sir_collapsed <- function(y, N, burnin, R_prerun,
     mh2_res <- mh_phi2_collapsed(phi2, log_lik2_cur, theta2_build_cur,
                                  ce2_params, nu_02, eta_02,
                                  theta1, phi1, theta_02,
-                                 chan_smoothing_theta2, log_det_K0)
+                                 chan_smoothing_theta2_w2lik, log_det_K0)
     
     phi2 <- mh2_res$phi2
     W2 <- 1/phi2
     
     
-    # Sample theta2 (Chan sampler)
-    # must happen BEFORE SIR of theta1, so SIR sees the fresh theta2
-    theta2_build <- chan_smoothing_theta2(theta1, phi1, phi2, theta_02)
-    theta2 <- chan_sample_from_build(theta2_build, Tt)
+    # (theta_02, theta2) jointly via extended block given accepted phi2.
+    # Sampled BEFORE (theta_01, theta1): theta1's SIR step needs the FRESH
+    # theta2 to keep the phi2-theta1 coupling tight - doing it in the
+    # opposite order (theta1 first) was found to degrade ESS(W2)
+    # substantially (ESS(W2) ~4500 vs ~350).
+    build2 <- chan_smoothing_theta2_ext(theta1, phi1, phi2, mu_02, sigma2_02, theta_01)
+    draw2  <- chan_sample_from_build(build2, Ttp1)
+    theta_02 <- draw2[1]
+    theta2   <- draw2[-1]
     
     
-    # Sample theta1* via SIR given accepted phi1 and the fresh theta2
-    res_sir <- sir_theta1(irls_cur, y, phi1, theta2, theta_01, theta_02, M_sir)
-    theta1 <- res_sir$theta1
+    # (theta_01, theta1) jointly (SIR, extended, given accepted phi1 and the
+    # fresh theta2)
+    res_sir <- sir_theta1(irls_cur, y, phi1, theta2, theta_02, M_sir,
+                          mu_01, sigma2_01, Tt, Ttp1)
+    theta_01 <- res_sir$theta_01
+    theta1   <- res_sir$theta1
     theta1_tilde <- irls_cur$theta1_tilde
    
     
     # Update irls_cur and log_lik1_cur for next iteration
-    # (theta2, theta_01, theta_02 all changed in this iteration)
-    irls_cur <- run_irls(theta1_tilde, theta2, theta_01, theta_02,
-                         phi1, y, tol, M_irls_max, chan_smoothing_theta1)
+    # (theta2, theta_02 both changed in this iteration)
+    irls_cur <- run_irls(theta1_tilde, theta2, theta_02,
+                         phi1, y, tol, M_irls_max, chan_smoothing_theta1,
+                         mu_01, sigma2_01)
     theta1_tilde <- irls_cur$theta1_tilde
     
-    res_lik1 <- is_log_lik(irls_cur, y, phi1, theta2, theta_01, theta_02, M_is)
+    res_lik1 <- is_log_lik(irls_cur, y, phi1, theta2, theta_02, M_is,
+                           Tt, Ttp1, mu_01, sigma2_01)
     log_lik1_cur <- res_lik1$log_lik
     
     
