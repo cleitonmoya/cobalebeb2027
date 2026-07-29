@@ -3,7 +3,7 @@
 # Author: Cleiton Moya de Almeida
 
 
-sample_stan <- function(model, y, N, burnin,
+sample_stan <- function(model, y, N, burnin, seed,
 						mu_01, sigma2_01, mu_02, sigma2_02,
 						nu_01, eta_01, nu_02, eta_02,
 						W1, W2, theta_01, theta_02, theta1, theta2){
@@ -46,7 +46,7 @@ sample_stan <- function(model, y, N, burnin,
 			iter   = N,
 			warmup = burnin,
 			thin   = 1,
-			seed   = 42,
+			seed   = seed,
 			init   = initial_values
 		)
 	))

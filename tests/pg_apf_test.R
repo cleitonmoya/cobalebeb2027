@@ -119,7 +119,6 @@ printf("\ttheta1 (mean): %.2f", mean(ess_theta1))
 printf("\ttheta_11 %.2f", ess_theta1[1])
 printf("\ttheta2 (mean): %.2f", mean(ess_theta2))
 
-
 # y, theta1_true, theta1_mean ####
 x <- 1:Tt
 par(mfrow=c(1,1), mar=c(4,4,2,2), cex=0.8)
@@ -130,27 +129,25 @@ lines(x, theta1_true, col="blue", lwd=2)
 legend("topright", legend=expression(hat(theta)[t1], theta[t1]),
 		   col=c("red","blue"), lwd=2, bty="n")
 
-# theta2_true, theta2_mean
+# theta2_mean
 par(mfrow=c(1,1), mar=c(4,4,2,2), cex=0.8)
 plot(x, theta2_mean, type="l", col="red", lwd=2,
 	 xlab="t", ylab="", main="theta_t2")
 legend("topright", legend=expression(hat(theta)[t2]), col="red", lwd=2, bty="n")
 
-# Traceplots for theta_t1 ####
+# Traceplot for theta_t1 ####
 par(mfrow = c(2, 2))
 for (t in t_obs) {
 	plot(theta1_hist[, t], type="l", main=bquote(theta[.(t)*","*1]), xlab="", ylab="")
 	abline(v=burnin, col="red")
 }
 
-
-# Traceplots for theta_t2 ####
+# Traceplot for theta_t2 ####
 par(mfrow = c(2, 2))
 for (t in t_obs) {
 	plot(theta2_hist[, t], type="l", main=bquote(theta[.(t)*","*1]), xlab="", ylab="")
 	abline(v=burnin, col="red")
 }
-
 
 # Effective sample size ####
 par(mfrow=c(1,1), mar=c(4,4,2,2), cex=0.8)

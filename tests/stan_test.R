@@ -4,7 +4,7 @@ library(coda)
 setwd(dirname(normalizePath(sys.frames()[[1]]$ofile)))
 
 rm(list = ls())     # clear the environment
-set.seed(42)
+seed <- 42          # used for Stan 
 
 source("../PoissonLTDM/R/utils.R")
 source("../PoissonLTDM/R/sampler_stan.R")
@@ -76,6 +76,7 @@ res <- sample_stan(
 	        y            = y,
 			N            = N,
 			burnin       = burnin,
+			seed         = seed,
 			mu_01        = mu_01,
 			sigma2_01    = sigma2_01,
 			mu_02        = mu_02,
@@ -101,7 +102,7 @@ W2_hist       <- res$W2_hist
 theta1_hist   <- res$theta1_hist
 theta2_hist   <- res$theta2_hist
 ac_hist       <- res$ac_hist
-elapsed_time  <- res$elapsed_time
+elapsed_time2 <- res$elapsed_time
 fit           <- res$fit
 
 #####
@@ -109,6 +110,7 @@ theta1_mean <- colMeans(theta1_hist[-(1:burnin), ])
 theta2_mean <- colMeans(theta2_hist[-(1:burnin), ])
 lambda_mean <- exp(theta1_mean)
 
+printf("Elapsed time by STAN: %.2f s", elapsed_time)
 printf("W1 mean: %.5f", mean(W1_hist[-(1:burnin)]))
 printf("W1 median: %.5f", median(W1_hist[-(1:burnin)]))
 printf("W2 mean: %.5f", mean(W2_hist[-(1:burnin)]))
@@ -117,11 +119,21 @@ printf("W2 median: %.5f", median(W2_hist[-(1:burnin)]))
 loglik <- sum(dpois(y, lambda_mean, log=TRUE))
 printf("Log-likelihood: %.2f", loglik)
 
-
-library(bayesplot)
-np <- nuts_params(fit)
-mcmc_nuts_energy(np)
-
+# Effective sample size
+ess_theta01 <- effectiveSize(mcmc(theta_01_hist[-(1:burnin)]))
+ess_theta02 <- effectiveSize(mcmc(theta_02_hist[-(1:burnin)]))
+ess_w1 <- effectiveSize(mcmc(W1_hist[-(1:burnin)]))
+ess_w2 <- effectiveSize(mcmc(W2_hist[-(1:burnin)]))
+ess_theta1 <- effectiveSize(mcmc(theta1_hist[-(1:burnin),]))
+ess_theta2 <- effectiveSize(mcmc(theta2_hist[-(1:burnin),]))
+printf("Effective Sample Size:")
+printf("\ttheta_01: %.2f", ess_theta01)
+printf("\ttheta_02: %.2f", ess_theta02)
+printf("\tW1: %.0f", ess_w1)
+printf("\tW2: %.0f", ess_w2)
+printf("\ttheta1 (mean): %.2f", mean(ess_theta1))
+printf("\ttheta_11 %.2f", ess_theta1[1])
+printf("\ttheta2 (mean): %.2f", mean(ess_theta2))
 
 # y, theta1_true, theta1_mean ####
 x <- 1:Tt
@@ -133,7 +145,7 @@ lines(x, theta1_true, col="blue", lwd=2)
 legend("topright", legend=expression(hat(theta)[t1], theta[t1]),
 		   col=c("red","blue"), lwd=2, bty="n")
 
-# theta2_true, theta2_mean
+# theta2_mean
 par(mfrow=c(1,1), mar=c(4,4,2,2), cex=0.8)
 plot(x, theta2_mean, type="l", col="red", lwd=2,
 	 xlab="t", ylab="", main="theta_t2")
@@ -144,5 +156,12 @@ t_obs <- c(50, 100, 150, 175)
 par(mfrow = c(2, 2))
 for (t in t_obs) {
 	plot(theta1_hist[, t], type="l", main=bquote(theta[.(t)*","*1]), xlab="", ylab="")
+	abline(v=burnin, col="red")
+}
+
+# Traceplot for theta_t2 ####
+par(mfrow = c(2, 2))
+for (t in t_obs) {
+	plot(theta2_hist[, t], type="l", main=bquote(theta[.(t)*","*1]), xlab="", ylab="")
 	abline(v=burnin, col="red")
 }
