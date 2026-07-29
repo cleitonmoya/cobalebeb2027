@@ -1,8 +1,9 @@
+library(coda)
+
 # Change de directory to the same of the current file
 setwd(dirname(normalizePath(sys.frames()[[1]]$ofile)))
 
-library(coda)
-
+rm(list = ls())     # clear the environment
 set.seed(42)
 
 source("../PoissonLTDM/R/utils.R")
@@ -12,14 +13,16 @@ source("../PoissonLTDM/R/sampler_amh_montoril.R")
 printf <- function(...) cat(paste(sprintf(...), "\n"))
 
 # Load the data
-data <- readRDS("../data/simulated/quadratic_200_1.rds")
+filename <- "quadratic_200_1"
+data <- readRDS(paste("../data/simulated/", filename, ".rds", sep=""))
+printf("Data: %s", filename)
+
 y <- data$y
 Tt <- length(y)
 if (Tt == 200) t_obs <- c(50, 100, 150, 175)
 if (Tt == 400) t_obs <- c(75, 100, 200, 300)
 if (Tt == 800) t_obs <- c(200, 300, 500, 700)
 if (Tt == 2000) t_obs <- c(500, 1000, 1500, 1750)
-
 theta1_true <- data$theta
 
 # Simulation parameters
@@ -27,7 +30,6 @@ N <- 10000                 # Number of steps
 burnin <- 1000             # Number of burn-in steps
 varsigma2_scal <- 0.02     # RWM variance initialization (adaptive algorithm)
 ac_ref <- 0.44             # acceptance ratio target
-
 
 # Prior hyperparameters
 # theta_01 ~ N(mu_01, sigma2_01)
@@ -54,7 +56,7 @@ theta_02 <- 0
 theta1 <- numeric(Tt)
 theta2 <- numeric(Tt)
 
-
+execution_bench <- system.time({
 res <- sample_amh_montoril(
 	        y         = y,
 			N         = N,
@@ -74,8 +76,10 @@ res <- sample_amh_montoril(
 			theta_01  = theta_01,
 			theta_02  = theta_02,
 			theta1    = theta1,
-			theta2    = theta2
-)
+			theta2    = theta2)
+})
+elapsed_time <- execution_bench[["elapsed"]]
+printf("Elapsed time: %.2f s", elapsed_time)
 
 theta_01_hist <- res$theta_01_hist
 theta_02_hist <- res$theta_02_hist

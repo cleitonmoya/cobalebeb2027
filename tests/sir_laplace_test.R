@@ -1,6 +1,7 @@
+library(coda)
+
 # Change de directory to the same of the current file
 setwd(dirname(normalizePath(sys.frames()[[1]]$ofile)))
-
 
 rm(list = ls())     # clear the environment
 set.seed(42)
@@ -12,9 +13,16 @@ source("../PoissonLTDM/R/sampler_sir_laplace.R")
 printf <- function(...) cat(paste(sprintf(...), "\n"))
 
 # Load the data
-data <- readRDS("../data/poisson_pol2_200.rds")
+filename <- "quadratic_200_1"
+data <- readRDS(paste("../data/simulated/", filename, ".rds", sep=""))
+printf("Data: %s", filename)
+
 y <- data$y
 Tt <- length(y)
+if (Tt == 200) t_obs <- c(50, 100, 150, 175)
+if (Tt == 400) t_obs <- c(75, 100, 200, 300)
+if (Tt == 800) t_obs <- c(200, 300, 500, 700)
+if (Tt == 2000) t_obs <- c(500, 1000, 1500, 1750)
 theta1_true <- data$theta
 
 # Simulation parameters
@@ -48,31 +56,34 @@ theta_01 <- 0
 theta_02 <- 0
 theta1 <- numeric(Tt)
 theta2 <- numeric(Tt)
-theta1_tilde <- numeric(Tt)
+theta1_tilde_scal <- 0
 
-res <- sample_sir_laplace(
-	        y            = y,
-			N            = N,
-			burnin       = burnin,
-			M_is         = M_is,
-			M_irls_max   = M_irls_max,
-			tol          = tol, 
-			mu_01        = mu_01,
-			sigma2_01    = sigma2_01,
-			mu_02        = mu_02,
-			sigma2_02    = sigma2_02,
-			nu_01        = nu_01,
-			eta_01       = eta_01,
-			nu_02        = nu_02,
-			eta_02       = eta_02,
-			W1           = W1,
-			W2           = W2,
-			theta_01     = theta_01,
-			theta_02     = theta_02,
-			theta1       = theta1,
-			theta2       = theta2,
-			theta1_tilde = theta1_tilde)
-
+execution_bench <- system.time({
+	res <- sample_sir_laplace(
+		        y            = y,
+				N            = N,
+				burnin       = burnin,
+				M_is         = M_is,
+				M_irls_max   = M_irls_max,
+				tol          = tol, 
+				mu_01        = mu_01,
+				sigma2_01    = sigma2_01,
+				mu_02        = mu_02,
+				sigma2_02    = sigma2_02,
+				nu_01        = nu_01,
+				eta_01       = eta_01,
+				nu_02        = nu_02,
+				eta_02       = eta_02,
+				W1           = W1,
+				W2           = W2,
+				theta_01     = theta_01,
+				theta_02     = theta_02,
+				theta1       = theta1,
+				theta2       = theta2,
+				theta1_tilde_scal = theta1_tilde_scal)
+})
+elapsed_time <- execution_bench[["elapsed"]]
+printf("Elapsed time: %.2f s", elapsed_time)
 
 theta_01_hist <- res$theta_01_hist
 theta_02_hist <- res$theta_02_hist
@@ -96,6 +107,22 @@ printf("W2 median: %.5f", median(W2_hist[-(1:burnin)]))
 loglik <- sum(dpois(y, lambda_mean, log=TRUE))
 printf("Log-likelihood: %.2f", loglik)
 
+# Effective sample size
+ess_theta01 <- effectiveSize(mcmc(theta_01_hist[-(1:burnin)]))
+ess_theta02 <- effectiveSize(mcmc(theta_02_hist[-(1:burnin)]))
+ess_w1 <- effectiveSize(mcmc(W1_hist[-(1:burnin)]))
+ess_w2 <- effectiveSize(mcmc(W2_hist[-(1:burnin)]))
+ess_theta1 <- effectiveSize(mcmc(theta1_hist[-(1:burnin),]))
+ess_theta2 <- effectiveSize(mcmc(theta2_hist[-(1:burnin),]))
+printf("Effective Sample Size:")
+printf("\ttheta_01: %.2f", ess_theta01)
+printf("\ttheta_02: %.2f", ess_theta02)
+printf("\tW1: %.0f", ess_w1)
+printf("\tW2: %.0f", ess_w2)
+printf("\ttheta1 (mean): %.2f", mean(ess_theta1))
+printf("\ttheta_11 %.2f", ess_theta1[1])
+printf("\ttheta2 (mean): %.2f", mean(ess_theta2))
+
 # y, theta1_true, theta1_mean ####
 x <- 1:Tt
 par(mfrow=c(1,1), mar=c(4,4,2,2), cex=0.8)
@@ -117,6 +144,13 @@ t_obs <- c(50, 100, 150, 175)
 par(mfrow = c(2, 2))
 for (t in t_obs) {
 	plot(theta1_hist[, t], type="l", main=bquote(theta[.(t)*","*1]), xlab="", ylab="")
+	abline(v=burnin, col="red")
+}
+
+# Traceplots for theta_t2 ####
+par(mfrow = c(2, 2))
+for (t in t_obs) {
+	plot(theta2_hist[, t], type="l", main=bquote(theta[.(t)*","*1]), xlab="", ylab="")
 	abline(v=burnin, col="red")
 }
 

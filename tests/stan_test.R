@@ -1,9 +1,9 @@
+library(coda)
+
 # Change de directory to the same of the current file
 setwd(dirname(normalizePath(sys.frames()[[1]]$ofile)))
 
-
 rm(list = ls())     # clear the environment
-options(error = function() traceback(2)) # more informative traceback
 set.seed(42)
 
 source("../PoissonLTDM/R/utils.R")
@@ -13,15 +13,21 @@ source("../PoissonLTDM/R/sampler_stan.R")
 printf <- function(...) cat(paste(sprintf(...), "\n"))
 
 # Load the data
-data <- readRDS("../data/poisson_pol2_200.rds")
+filename <- "quadratic_200_1"
+data <- readRDS(paste("../data/simulated/", filename, ".rds", sep=""))
+printf("Data: %s", filename)
+
 y <- data$y
 Tt <- length(y)
+if (Tt == 200) t_obs <- c(50, 100, 150, 175)
+if (Tt == 400) t_obs <- c(75, 100, 200, 300)
+if (Tt == 800) t_obs <- c(200, 300, 500, 700)
+if (Tt == 2000) t_obs <- c(500, 1000, 1500, 1750)
 theta1_true <- data$theta
 
 # Simulation parameters
 N <- 10000           # number of steps
 burnin <- 1000       # number of burn-in steps
-
 
 # Prior hyperparameters
 # theta_01 ~ N(mu_01, sigma2_01)
@@ -57,7 +63,6 @@ rstan::rstan_options(auto_write = FALSE)
 # Load or compile the model
 if (file.exists("../cache/poisson_ltdm.rds")) {
 	model <- readRDS("../cache/poisson_ltdm.rds")
-	printf("Model loaded")
 } else {
 	printf("Building the model")
 	file <- "../PoissonLTDM/inst/stan/poisson_ltdm.stan"
@@ -65,7 +70,7 @@ if (file.exists("../cache/poisson_ltdm.rds")) {
 	saveRDS(model, file = "../cache/poisson_ltdm.rds")
 }
 
-start_time = proc.time() # execution time
+execution_bench <- system.time({
 res <- sample_stan(
 			model        = model, 
 	        y            = y,
@@ -84,13 +89,10 @@ res <- sample_stan(
 			theta_01     = theta_01,
 			theta_02     = theta_02,
 			theta1       = theta1,
-			theta2       = theta2
-)
-
-# Execution time
-end_time <- proc.time()
-elapsed_time <- (end_time - start_time)[[1]]
-printf("Total elapsed CPU time: %.0f s", elapsed_time)
+			theta2       = theta2)
+})
+elapsed_time <- execution_bench[["elapsed"]]
+printf("Elapsed time: %.2f s", elapsed_time)
 
 theta_01_hist <- res$theta_01_hist
 theta_02_hist <- res$theta_02_hist

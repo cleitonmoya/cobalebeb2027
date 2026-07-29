@@ -214,6 +214,7 @@ chan_build_static_objects <- function(Tt) {
 	chan_build_chain(Tt, first_node_order=2)
 }
 
+
 # Used in: make_chan_theta2_smoother_ext, make_chan_theta1_smoother_ext
 # Extended, (T+1)-dimensional block: theta_01 (resp. theta_02) is folded in as
 # node "0" of the chain, so the WHOLE chain (T+1 nodes) is FREE/unanchored
@@ -224,6 +225,7 @@ chan_build_static_objects_ext <- function(Ttp1) {
 	chan_build_chain(Ttp1, first_node_order=1)
 }
 
+
 # Used in: sir_collapsed
 # log|K0| (constant, precomputed once - used in the exact W2 marginal likelihood)
 chan_log_det_K0 <- function(Tt) {
@@ -231,7 +233,6 @@ chan_log_det_K0 <- function(Tt) {
 	log_det_K0 <- 2 * as.numeric(Matrix::determinant(res$Ch0_factor, logarithm = TRUE)$modulus)
 	return(log_det_K0)
 }
-
 
 
 # Used in: sampler_amh_montoril, sampler_pg_apf, sampler_sir_laplace, sampler_sir_collapsed
@@ -273,6 +274,7 @@ make_chan_theta2_smoother_ext <- function(Ttp1) {
 	return(chan_smoothing_theta2)
 }
 
+
 # Used in: sampler_sir_laplace, sampler_sir_collapsed
 # Laplace/IRLS approximation for (theta_01, theta1) JOINTLY via the extended,
 # (T+1)-dimensional Chan block: theta_01 is folded in as node "0" of the
@@ -311,8 +313,6 @@ make_chan_theta1_smoother_ext <- function(Ttp1) {
 	
 	return(chan_smoothing_theta1)
 }
-
-
 
 
 # Used in: sampler_amh_montoril, sampler_pg_apf, sampler_sir_laplace, sampler_sir_collapsed
