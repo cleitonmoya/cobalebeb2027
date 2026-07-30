@@ -157,6 +157,7 @@ log_marginal_lik_w2 <- function(theta1, phi1, phi2, theta_02,
     theta2_hat <- build$theta2_hat
     ch <- build$ch
     z <- build$z
+    Tt <- length(theta1)
 
     log_pz <- -0.5*(Tt-1)*log(2*pi/phi1) - 0.5*phi1*sum((z - theta2_hat[1:(Tt-1)])^2)
 

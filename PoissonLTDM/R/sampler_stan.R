@@ -39,15 +39,17 @@ sample_stan <- function(model, y, N, burnin, seed,
 	)
 	
 	invisible(capture.output(
-		fit <- rstan::sampling(
-			object = model,
-			data   = stan_data,
-			chains = 1,
-			iter   = N,
-			warmup = burnin,
-			thin   = 1,
-			seed   = seed,
-			init   = initial_values
+		fit <- suppressWarnings(
+			rstan::sampling(
+				object = model,
+				data   = stan_data,
+				chains = 1,
+				iter   = N,
+				warmup = burnin,
+				thin   = 1,
+				seed   = seed,
+				init   = initial_values
+			)
 		)
 	))
 	

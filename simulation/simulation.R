@@ -2,11 +2,14 @@
 # Main simulation script
 # Author: Cleiton Moya de Almeida
 
-# library(rstan)
-devtools::load_all("PoissonLTDM") # package with the samplers
+# Provide more informative traceback
+options(error = function() traceback(2)) 
 
 # Change de directory to the same of the current file
 setwd(dirname(normalizePath(sys.frames()[[1]]$ofile)))
+
+devtools::load_all("../PoissonLTDM") # package with the samplers
+
 path_data <- "../data/simulated"
 path_results <- "results"
 path_results_partial <- sprintf("%s/%s", path_results, "partial")
@@ -84,7 +87,7 @@ task_grid <- expand.grid(
 )
 
 grid_size <- nrow(task_grid)
-printf("Total of tasks: %d\n", grid_size)
+printf("Total of tasks: %d", grid_size)
 
 # Task stars: Store all simulated data for the (stars) selected functions and Tt 
 f_star <- "quadratic"
@@ -94,7 +97,7 @@ task_grid$star <- with(task_grid,
 	replica == 1 & Tt %in% Tt_star & f == f_star
 )
 
-printf("Total of star tasks: %d\n", sum(task_grid$star))
+printf("Total of star tasks: %d", sum(task_grid$star))
 
 
 # Insert seed column
@@ -102,21 +105,21 @@ task_grid$seed <- 1:grid_size
 
 
 task_result_filename <- function(task) {
-	file_name <- sprintf("%s/%d_%s_%s_r%03d.rds",
-						 path_results_partial, task$Tt, task$f,
-						 task$method, task$replica)
+	file_name <- sprintf("%s/%s_%s_%s_%s.rds",
+						 path_results_partial, task$method, task$f, task$Tt,
+						 task$replica)
 	return(file_name)
 }
 
 task_star_result_filename <- function(task) {
-	file_name <- sprintf("%s/Tt%d_%s_%s_r%03d.rds",
-						 path_results_star, task$Tt, task$f,
-						 task$method, task$replica)
+	file_name <- sprintf("%s/%s_%s_%s_%s.rds",
+						 path_results_star, task$method, task$f, task$Tt,
+						 task$replica)
 	return(file_name)
 }
 
 data_filename <- function(task) {
-	file_name <- sprintf("%s/%s_%d_%d.rds",
+	file_name <- sprintf("%s/%s_%s_%s.rds",
 						 path_data, task$f, task$Tt, task$replica)
 	return(file_name)
 }
@@ -141,7 +144,8 @@ run_task <- function(task) {
 	
 	# Checkpoint: skip the task if it is already done
 	if (file.exists(task_result_file)) {
-		result <- readRDS(task_result_file) #
+		printf("\tTask already run, loading results")
+		result <- readRDS(task_result_file)
 	} else {
 		
 		# Load the data
@@ -157,7 +161,6 @@ run_task <- function(task) {
 			# Load or compile the model
 			if (file.exists("../cache/poisson_ltdm.rds")) {
 				model <- readRDS("../cache/poisson_ltdm.rds")
-				printf("Model loaded")
 			} else {
 				printf("Building the Stan model")
 				file <- "../PoissonLTDM/inst/stan/poisson_ltdm.stan"
@@ -201,6 +204,7 @@ run_task <- function(task) {
 			)
 		})
 		elapsed_time <- execution_bench[["elapsed"]]
+		printf("All tasks ran")
 		
 		
 		#
@@ -231,14 +235,16 @@ run_task <- function(task) {
 		ess_W2 <- compute_ess(W2_hist[-(1:burnin)])
 		ess_theta1 <- compute_ess(theta1_hist[-(1:burnin), ])
 		ess_theta2 <- compute_ess(theta2_hist[-(1:burnin), ])
+		ess_theta1_mean <- mean(ess_theta1)
+		ess_theta2_mean <- mean(ess_theta2)
 		
 		# Effective Sample Size per second
 		ess_sec_theta_01 <- ess_theta_01/elapsed_time
 		ess_sec_theta_02 <- ess_theta_02/elapsed_time
 		ess_sec_W1 <- ess_W1/elapsed_time
 		ess_sec_W2 <- ess_W2/elapsed_time
-		ess_sec_theta1_mean <- mean(ess_theta1/elapsed_time)
-		ess_sec_theta2_mean <- mean(ess_theta2/elapsed_time)
+		ess_sec_theta1_mean <- ess_theta1_mean/elapsed_time
+		ess_sec_theta2_mean <- ess_theta2_mean/elapsed_time
 		
 		# Geweke diagnostic
 		z_W1 <- compute_geweke(W1_hist[-(1:burnin)])
@@ -307,37 +313,39 @@ run_task <- function(task) {
 			stringsAsFactors = FALSE
 		)
 		
-		# Only for Montoril and Stan
-		if (method %in% c("montoril", "stan")) {
-			task_result$ac_hist = res$ac_hist
-		}
-
-		if (method == "pg_apf") {
-			task_result$ess_smc = res$ess_smc
-		}
-		
-		if (method %in% c("sir_laplace", "sir_collapsed")) {
-			task_result$ess_is = res$ess_is
-			task_result$itr_irls = res$itr_irls
-		}
-		
-		if (method == "sir_collapsed") {
-			task_result$accepted1_hist <- res$accepted1_hist
-			task_result$accepted2_hist <- res$accepted2_hist
-		}
-		
 		saveRDS(task_result, file = task_result_file)
 		
 		# Level two - Star tasks
 		if (task$star) {
-			saveRDS(list(
+			
+			result_star <- list(
 				W1_hist = W1_hist,
 				W2_hist = W2_hist,
 				theta_01_hist = theta_01_hist,
 				theta_02_hist = theta_02_hist,
 				theta1_hist = theta1_hist,
-				theta2_hist = theta2_hist
-			), file = task_star_result_file)
+				theta2_hist = theta2_hist)
+
+			# Only for Montoril and Stan
+			if (method %in% c("montoril", "stan")) {
+				result_star$ac_hist = res$ac_hist
+			}
+			
+			if (method == "pg_apf") {
+				result_star$ess_smc = res$ess_smc
+			}
+			
+			if (method %in% c("sir_laplace", "sir_collapsed")) {
+				result_star$ess_is = res$ess_is
+				result_staritr_irls = res$itr_irls
+			}
+			
+			if (method == "sir_collapsed") {
+				result_star$accepted1_hist <- res$accepted1_hist
+				result_star$accepted2_hist <- res$accepted2_hist
+			}
+			
+			saveRDS(result_star, file = task_star_result_file)
 		}
 		
 		result <- task_result
@@ -358,8 +366,8 @@ for (i in 1:grid_size) {
 	printf("Running task %d/%d: f=%s, Tt=%d, method=%s,replica=%d",
 		   i,
 		   grid_size,
-		   task_grid$Tt[i], 
 		   task_grid$f[i],
+		   task_grid$Tt[i],
 		   task_grid$method[i],
 		   task_grid$replica[i])
 

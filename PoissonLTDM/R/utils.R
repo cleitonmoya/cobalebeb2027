@@ -230,7 +230,9 @@ chan_build_static_objects_ext <- function(Ttp1) {
 # log|K0| (constant, precomputed once - used in the exact W2 marginal likelihood)
 chan_log_det_K0 <- function(Tt) {
 	res <- chan_build_static_objects(Tt)
-	log_det_K0 <- 2 * as.numeric(Matrix::determinant(res$Ch0_factor, logarithm = TRUE)$modulus)
+	log_det_K0 <- 2 * as.numeric(Matrix::determinant(res$Ch0_factor, 
+													 logarithm = TRUE,
+													 sqrt = TRUE)$modulus)
 	return(log_det_K0)
 }
 
