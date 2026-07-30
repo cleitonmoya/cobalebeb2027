@@ -4,6 +4,7 @@
 
 # Provide more informative traceback
 options(error = function() traceback(2)) 
+rm(list = ls())     # clear the environment
 
 # Change de directory to the same of the current file
 setwd(dirname(normalizePath(sys.frames()[[1]]$ofile)))
@@ -15,6 +16,10 @@ path_results <- "results"
 path_results_partial <- sprintf("%s/%s", path_results, "partial")
 path_results_star <- sprintf("%s/%s", path_results, "star")
 
+verbose <- TRUE
+parallel <- TRUE
+n_cores <- 2
+
 # Print auxiliary function
 printf <- function(...) cat(paste(sprintf(...), "\n"))
 
@@ -24,7 +29,7 @@ N <- 10000          # number of iterations
 burnin <- 1000
 
 # Adaptive Metropolis hyperparameters
-# (for amh_cw and amg_montoril)
+# (for montoril)
 varsigma2_scal <- 0.02     # initial varsigma2
 ac_ref <- 0.44             # acceptance ratio target
 
@@ -64,7 +69,6 @@ theta_01 <- 0
 theta_02 <- 0
 theta1_tilde_scal <- 0 # sir_laplace and sir_collapsed
 
-# General hyperparameters
 
 #####
 # Build the Task Grid 
@@ -87,7 +91,7 @@ task_grid <- expand.grid(
 )
 
 grid_size <- nrow(task_grid)
-printf("Total of tasks: %d", grid_size)
+if (verbose) printf("Total of tasks: %d", grid_size)
 
 # Task stars: Store all simulated data for the (stars) selected functions and Tt 
 f_star <- "quadratic"
@@ -97,7 +101,7 @@ task_grid$star <- with(task_grid,
 	replica == 1 & Tt %in% Tt_star & f == f_star
 )
 
-printf("Total of star tasks: %d", sum(task_grid$star))
+if (verbose) printf("Total of star tasks: %d", sum(task_grid$star))
 
 
 # Insert seed column
@@ -144,7 +148,7 @@ run_task <- function(task) {
 	
 	# Checkpoint: skip the task if it is already done
 	if (file.exists(task_result_file)) {
-		printf("\tTask already run, loading results")
+		if (verbose) printf("\tTask already run, loading results")
 		result <- readRDS(task_result_file)
 	} else {
 		
@@ -162,7 +166,7 @@ run_task <- function(task) {
 			if (file.exists("../cache/poisson_ltdm.rds")) {
 				model <- readRDS("../cache/poisson_ltdm.rds")
 			} else {
-				printf("Building the Stan model")
+				if (verbose) printf("Building the Stan model")
 				file <- "../PoissonLTDM/inst/stan/poisson_ltdm.stan"
 				model <- rstan::stan_model(file = file, model_name = "PoissonLTDM")
 				saveRDS(model, file = "../cache/poisson_ltdm.rds")
@@ -204,7 +208,7 @@ run_task <- function(task) {
 			)
 		})
 		elapsed_time <- execution_bench[["elapsed"]]
-		printf("All tasks ran")
+		if (verbose) printf("All tasks ran")
 		
 		
 		#
@@ -337,7 +341,7 @@ run_task <- function(task) {
 			
 			if (method %in% c("sir_laplace", "sir_collapsed")) {
 				result_star$ess_is = res$ess_is
-				result_staritr_irls = res$itr_irls
+				result_star$itr_irls = res$itr_irls
 			}
 			
 			if (method == "sir_collapsed") {
@@ -356,35 +360,65 @@ run_task <- function(task) {
 
 
 #####
-# Sequential execution
-#
+# Main exection
 
-result_list <- vector("list", grid_size)
-
-for (i in 1:grid_size) {
+start_time = proc.time() # execution time
+if (!parallel) {
 	
-	printf("Running task %d/%d: f=%s, Tt=%d, method=%s,replica=%d",
-		   i,
-		   grid_size,
-		   task_grid$f[i],
-		   task_grid$Tt[i],
-		   task_grid$method[i],
-		   task_grid$replica[i])
+	if (verbose) printf("Starting sequential execution")
+	
+	result_list <- vector("list", grid_size)
+	for (i in 1:grid_size) {
+		
+		if (verbose) printf("Running task %d/%d: f=%s, Tt=%d, method=%s,replica=%d",
+							i,
+							grid_size,
+							task_grid$f[i],
+							task_grid$Tt[i],
+							task_grid$method[i],
+							task_grid$replica[i])
+		
+		result_list[[i]] <- run_task(task_grid[i, ])
+	}
+	
+	# Stack the results (1-row data.frame) in a single data.frame
+	df_results <- do.call(rbind, result_list)
+	
+} else {
+	
+	# Parallel execution
+	if (verbose) printf("Starting parallel execution")
+	current_wd <- getwd()
+	
+	`%dorng%` <- doRNG::`%dorng%`
+	
+	cl <- parallel::makeCluster(n_cores)
+	doParallel::registerDoParallel(cl)
+	parallel::clusterExport(cl, "current_wd")
+	
+	parallel::clusterEvalQ(cl, {
+		setwd(current_wd)
+		devtools::load_all("../PoissonLTDM")
+	})
+	
+	df_results <- foreach::foreach(
+		i = 1:grid_size,
+		.combine = rbind) %dorng% {
+		run_task(task_grid[i, ])
+	}
 
-	result_list[[i]] <- run_task(task_grid[i, ])
+	parallel::stopCluster(cl)
 }
+end_time <- proc.time()
+execution_time <- (end_time - start_time)[[3]]
 
-# Stack the results (1-row data.frame) in a single data.frame
-df_results <- do.call(rbind, result_list)
-
-
-#
+#####
 # Aggregate the results
-#
+
 file_rds <- sprintf("%s/simulation_results.rds", path_results) 
 saveRDS(df_results, file = file_rds)
 
 file_csv <- sprintf("%s/simulation_results.csv", path_results) 
 write.csv(df_results, file = file_csv, row.names = FALSE)
 
-printf("Simulation complete!")
+if (verbose) printf("Simulation complete in %.1f min", execution_time/60)
