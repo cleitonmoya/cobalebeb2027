@@ -9,14 +9,13 @@
 #   4) sinusoidal
 #
 # For each class and each Tt in Tt_grid, K replicas are generated with
-# randomly drawn parameters (breakpoints via Dirichlet gaps, levels/amplitudes
-# via uniform/normal draws). Each replica is saved as an individual .rds file
-# following the pattern: <function>_<Tt>_<replica>.rds
+# randomly or fixed drawn parameters (breakpoints via Dirichlet gaps, 
+# levels/amplitudes # via uniform/normal draws). Each replica is saved as an 
+# individual .rds file # following the pattern: <function>_<Tt>_<replica>.rds
 #
-# Author: Conceptual design: Cleiton Moya de Almeida 
-#         Detailed design and code: Claude Sonnet 5 (low effort)
+# Author: Cleiton Moya de Almeida
 
-set.seed(42)  # sin50gle global seed
+set.seed(42)  # single global seed
 
 # Change de directory to the same of the current file
 setwd(dirname(normalizePath(sys.frames()[[1]]$ofile)))
@@ -39,7 +38,7 @@ sample_props <- function(K, alpha_conc, min_gap_frac = NULL) {
 }
 
 
-generate_constant_params <- function(K = 6,
+generate_constant_params <- function(K = 5,
                                      alpha_conc = 8,
                                      value_range = c(0.5, 3.5),
                                      min_gap_frac = NULL) {
@@ -50,7 +49,7 @@ generate_constant_params <- function(K = 6,
 }
 
 
-generate_linear_params <- function(K = 8,
+generate_linear_params <- function(K = 5,
                                    alpha_conc = 8,
                                    value_range = c(0.5, 3.5),
                                    min_gap_frac = NULL) {
@@ -61,7 +60,7 @@ generate_linear_params <- function(K = 8,
 }
 
 
-generate_piecewise_pol_params <- function(K = 10,
+generate_piecewise_pol_params <- function(K = 5,
                                           alpha_conc = 8,
                                           value_range = c(0.5, 3.5),
                                           bulge_sd = 0.5,
@@ -76,7 +75,7 @@ generate_piecewise_pol_params <- function(K = 10,
 
 generate_sinusoidal_params <- function(mean_range   = c(1.5, 3.0),
                                        amp_range    = c(0.3, 1.0),
-                                       n_cycles_set = 2:8) {
+                                       n_cycles_set = 2:2) {
     mean_level <- runif(1, min = mean_range[1], max = mean_range[2])
     # Keep amplitude below mean_level to avoid theta_t1 too close to/below 0
     amp_upper  <- min(amp_range[2], mean_level - 0.3)
@@ -186,7 +185,7 @@ function_registry <- list(
 # 4. Driver: generate K replicas per function class and save to .rds
 # -----------------------------------------------------------------------------
 
-simulate_and_save <- function(Tt_grid, K, output_dir) {
+simulate_and_save <- function(Tt_grid, K, output_dir, fixed_parameters = FALSE) {
     
     if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
     
@@ -195,11 +194,17 @@ simulate_and_save <- function(Tt_grid, K, output_dir) {
     for (func_name in func_names) {
         entry <- function_registry[[func_name]]
         
+        # If fixed_parameters = TRUE, parameters are drawn ONCE per function
+        # (fixed across all K replicas and all Tt in the grid) -> same theta1
+        # (true level) for every replica; only y varies, via the Poisson
+        # draw seed. If FALSE, parameters are drawn once per (function,
+        # replica) -> same waveform shape across all Tt in the grid, only
+        # the discretization changes.
+        if (fixed_parameters) params <- entry$gen_params()
+        
         for (r in 1:K) {
             
-            # Parameters drawn ONCE per (function, replica) -> same waveform
-            # shape across all Tt in the grid, only the discretization changes.
-            params <- entry$gen_params()
+            if (!fixed_parameters) params <- entry$gen_params()
             
             for (Tt in Tt_grid) {
                 theta1 <- entry$gen_series(Tt, params)
@@ -227,9 +232,10 @@ simulate_and_save <- function(Tt_grid, K, output_dir) {
 # 5. Execution: 4 functions x K = 50 replicas x 4 values of Tt
 # -----------------------------------------------------------------------------
 
-Tt_grid <- c(200, 400, 800, 2000)
-K <- 50
+Tt_grid <- c(200, 400, 800, 1600)
+K <- 100
 output_dir = "../data/simulated/"
+fixed_parameters <- TRUE  # same theta1 (across all K replicas per function
 
-simulate_and_save(Tt_grid = Tt_grid, K = K, output_dir = output_dir)
-
+simulate_and_save(Tt_grid = Tt_grid, K = K, output_dir = output_dir,
+                   fixed_parameters = fixed_parameters)

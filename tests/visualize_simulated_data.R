@@ -23,7 +23,7 @@ setwd(dirname(normalizePath(sys.frames()[[1]]$ofile)))
 
 input_dir    <- "../data/simulated/"
 func_names   <- c("constant", "linear", "quadratic", "sinusoidal")
-Tt_selected  <- c(200, 2000)
+Tt_selected  <- c(200, 1600)
 replicas_sel <- c(1, 2)
 
 # -----------------------------------------------------------------------------
