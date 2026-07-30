@@ -15,7 +15,7 @@
 #
 # Author: Cleiton Moya de Almeida
 
-set.seed(42)  # single global seed
+set.seed(1)  # single global seed
 
 # Change de directory to the same of the current file
 setwd(dirname(normalizePath(sys.frames()[[1]]$ofile)))
@@ -75,12 +75,13 @@ generate_piecewise_pol_params <- function(K = 5,
 
 generate_sinusoidal_params <- function(mean_range   = c(1.5, 3.0),
                                        amp_range    = c(0.3, 1.0),
-                                       n_cycles_set = 2:2) {
+                                       n_cycles_set = 2:5) {
     mean_level <- runif(1, min = mean_range[1], max = mean_range[2])
     # Keep amplitude below mean_level to avoid theta_t1 too close to/below 0
     amp_upper  <- min(amp_range[2], mean_level - 0.3)
     amplitude  <- runif(1, min = amp_range[1], max = max(amp_range[1] + 1e-6, amp_upper))
-    n_cycles   <- sample(n_cycles_set, 1)
+    #n_cycles   <- sample(n_cycles_set, 1)
+    n_cycles   <- 1
     phase      <- runif(1, min = 0, max = 2 * pi)
     
     return(list(mean_level = mean_level, amplitude = amplitude,
@@ -233,7 +234,7 @@ simulate_and_save <- function(Tt_grid, K, output_dir, fixed_parameters = FALSE) 
 # -----------------------------------------------------------------------------
 
 Tt_grid <- c(200, 400, 800, 1600)
-K <- 100
+K <- 2
 output_dir = "../data/simulated/"
 fixed_parameters <- TRUE  # same theta1 (across all K replicas per function
 
