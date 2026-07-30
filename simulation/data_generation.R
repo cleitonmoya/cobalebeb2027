@@ -234,7 +234,7 @@ simulate_and_save <- function(Tt_grid, K, output_dir, fixed_parameters = FALSE) 
 # -----------------------------------------------------------------------------
 
 Tt_grid <- c(200, 400, 800, 1600)
-K <- 2
+K <- 100
 output_dir = "../data/simulated/"
 fixed_parameters <- TRUE  # same theta1 (across all K replicas per function
 
