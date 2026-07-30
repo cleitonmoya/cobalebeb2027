@@ -5,6 +5,7 @@ setwd(dirname(normalizePath(sys.frames()[[1]]$ofile)))
 
 rm(list = ls())     # clear the environment
 seed <- 42          # used for Stan 
+set.seed(seed)      # alse used for stan for initialization, if not specified
 
 source("../PoissonLTDM/R/utils.R")
 source("../PoissonLTDM/R/sampler_stan.R")
@@ -13,7 +14,7 @@ source("../PoissonLTDM/R/sampler_stan.R")
 printf <- function(...) cat(paste(sprintf(...), "\n"))
 
 # Load the data
-filename <- "quadratic_200_1"
+filename <- "quadratic_2000_1"
 data <- readRDS(paste("../data/simulated/", filename, ".rds", sep=""))
 printf("Data: %s", filename)
 
@@ -110,7 +111,7 @@ theta1_mean <- colMeans(theta1_hist[-(1:burnin), ])
 theta2_mean <- colMeans(theta2_hist[-(1:burnin), ])
 lambda_mean <- exp(theta1_mean)
 
-printf("Elapsed time by STAN: %.2f s", elapsed_time)
+printf("Elapsed time by STAN: %.2f s", elapsed_time2)
 printf("W1 mean: %.5f", mean(W1_hist[-(1:burnin)]))
 printf("W1 median: %.5f", median(W1_hist[-(1:burnin)]))
 printf("W2 mean: %.5f", mean(W2_hist[-(1:burnin)]))

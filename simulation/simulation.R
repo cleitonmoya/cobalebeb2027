@@ -2,14 +2,15 @@
 # Main simulation script
 # Author: Cleiton Moya de Almeida
 
-library(Matrix)
-library(coda)
-library(invgamma)
 # library(rstan)
 devtools::load_all("PoissonLTDM") # package with the samplers
 
 # Change de directory to the same of the current file
 setwd(dirname(normalizePath(sys.frames()[[1]]$ofile)))
+path_data <- "../data/simulated"
+path_results <- "results"
+path_results_partial <- sprintf("%s/%s", path_results, "partial")
+path_results_star <- sprintf("%s/%s", path_results, "star")
 
 # Print auxiliary function
 printf <- function(...) cat(paste(sprintf(...), "\n"))
@@ -62,11 +63,17 @@ theta1_tilde_scal <- 0 # sir_laplace and sir_collapsed
 
 # General hyperparameters
 
+#####
 # Build the Task Grid 
-Tt_grid <- c(200, 400, 800, 2000)
-functions_grid <- c("constant", "linear", "quadratic", "sinusoidal")
-methods_grid <- c("mh_cw", "mh_montoril", "pg_apf", "sir_collapsed", "sir_laplace", "stan")
-N_replicas <- 50
+
+Tt_grid <- c(200)
+functions_grid <- c("quadratic")
+methods_grid <- c("montoril", "pg_apf", "sir_collapsed", "sir_laplace", "stan")
+
+# Tt_grid <- c(200, 400, 800, 2000)
+# functions_grid <- c("constant", "linear", "quadratic", "sinusoidal")
+# methods_grid <- c("montoril", "pg_apf", "sir_collapsed", "sir_laplace", "stan")
+N_replicas <- 1
 
 task_grid <- expand.grid(
 	Tt = Tt_grid,
@@ -80,7 +87,7 @@ grid_size <- nrow(task_grid)
 printf("Total of tasks: %d\n", grid_size)
 
 # Task stars: Store all simulated data for the (stars) selected functions and Tt 
-f_star <- "piece_trend"
+f_star <- "quadratic"
 Tt_star <- c(200, 2000)
 
 task_grid$star <- with(task_grid,
@@ -94,24 +101,21 @@ printf("Total of star tasks: %d\n", sum(task_grid$star))
 task_grid$seed <- 1:grid_size
 
 
-task_file_name <- function(task) {
-	path_partial <- "results/partial"
+task_result_filename <- function(task) {
 	file_name <- sprintf("%s/%d_%s_%s_r%03d.rds",
-						 path_partial, task$Tt, task$f,
+						 path_results_partial, task$Tt, task$f,
 						 task$method, task$replica)
 	return(file_name)
 }
 
-task_star_file_name <- function(task) {
-	path_star <- "results/star"
+task_star_result_filename <- function(task) {
 	file_name <- sprintf("%s/Tt%d_%s_%s_r%03d.rds",
-						 path_star, task$Tt, task$f,
+						 path_results_star, task$Tt, task$f,
 						 task$method, task$replica)
 	return(file_name)
 }
 
-data_file_name <- function(task) {
-	path_data <- "../data/simulated"
+data_filename <- function(task) {
 	file_name <- sprintf("%s/%s_%d_%d.rds",
 						 path_data, task$f, task$Tt, task$replica)
 	return(file_name)
@@ -121,9 +125,9 @@ data_file_name <- function(task) {
 run_task <- function(task) {
 
 	Tt <- task$Tt
+	replica <- task$replica
 	f <- task$f
 	method <- task$method
-	replica <- task$replica
 	seed <- task$seed
 
 	# Initial values for theta1, theta2 (need Tt) 
@@ -131,18 +135,20 @@ run_task <- function(task) {
 	theta2 <- numeric(Tt)
 	
 	
-	file_name  <- task_file_name(task)
-	file_star_name <- task_star_file_name(task)
+	task_result_file  <- task_result_filename(task)
+	task_star_result_file <- task_star_result_filename(task)
 
 	
 	# Checkpoint: skip the task if it is already done
-	if (file.exists(file_name)) {
-		result = readRDS(file_name) #
+	if (file.exists(task_result_file)) {
+		result <- readRDS(task_result_file) #
 	} else {
 		
 		# Load the data
-		data <- readRDS(data_file_name(task))
+		data_file <- data_filename(task)
+		data <- readRDS(data_file)
 		y <- data$y
+		theta1_true <- data$theta
 		
 		# Run the task
 		set.seed(seed)
@@ -153,7 +159,7 @@ run_task <- function(task) {
 				model <- readRDS("../cache/poisson_ltdm.rds")
 				printf("Model loaded")
 			} else {
-				printf("Building the model")
+				printf("Building the Stan model")
 				file <- "../PoissonLTDM/inst/stan/poisson_ltdm.stan"
 				model <- rstan::stan_model(file = file, model_name = "PoissonLTDM")
 				saveRDS(model, file = "../cache/poisson_ltdm.rds")
@@ -162,13 +168,8 @@ run_task <- function(task) {
 		
 		execution_bench <- system.time({
 			res <- switch(method,
-						  
-				"amh_cw" = sample_amh_cw(y, N, burnin, varsigma2_scal, ac_ref,
-										 mu_01, sigma2_01, mu_02, sigma2_02,
-										 nu_01, eta_01, nu_02, eta_02,
-										 W1, W2, theta_01, theta_02, theta1, theta2),
-								
-				"amh_montoril" = sample_amh_montoril(y, N, burnin, varsigma2_scal, ac_ref,
+				
+				"montoril" = sample_amh_montoril(y, N, burnin, varsigma2_scal, ac_ref,
 												    mu_01, sigma2_01, mu_02, sigma2_02,
 												    nu_01, eta_01, nu_02, eta_02,
 												    W1, W2, theta_01, theta_02, theta1, theta2),
@@ -191,7 +192,7 @@ run_task <- function(task) {
 													   W1, W2, theta_01, theta_02, theta1, theta2,
 													   theta1_tilde_scal),
 								
-				"stan" = sample_stan(model, y, N, burnin,
+				"stan" = sample_stan(model, y, N, burnin, seed,
 									 mu_01, sigma2_01, mu_02, sigma2_02,
 									 nu_01, eta_01, nu_02, eta_02,
 									 W1, W2, theta_01, theta_02, theta1, theta2),
@@ -214,141 +215,168 @@ run_task <- function(task) {
 		theta1_hist = res$theta1_hist
 		theta2_hist = res$theta2_hist
 		
-		# Only for amh_cw, amd_montoril and stan
-		if (method %in% c("amh_cw", "amg_montoril", "stan")) {
-			ac_hist = res$ac_hist
-		}
-		
-		if (method == "pg_apf") {
-			ess_smc <- res$ess_smc
-		}
-		
-		if (method %in% c("sir_laplace", "sir_collapsed")) {
-			ess_is        <- res$ess_is
-			itr_irls      <- res$itr_irls
-		}
-		
-		if (method == "sir_collapsed") {
-			accepted1_hist <- res$accepted1_hist
-			accepted2_hist <- res$accepted2_hist
-		}
-		
 		if (method == "stan") {
-			stan_elapsed_time <- res$elapsed_time
+			# overwrite the previous elapsed time computed by system.time()
+			elapsed_time <- res$elapsed_time
 		}
 		
 		#
-		# Compute the metrics
+		# Compute the metrics of the replica
 		#
 		
 		# Effective Sample Size
 		ess_theta_01 <- compute_ess(theta_01_hist[-(1:burnin)])
-		ess_theta_01 <- compute_ess(theta_01_hist[-(1:burnin)])
-		
-		ess_W1 <- compute_ess(w1_hist[-(1:burnin)])
-		ess_W2 <- compute_ess(w2_hist[-(1:burnin)])
-		
+		ess_theta_02 <- compute_ess(theta_02_hist[-(1:burnin)])
+		ess_W1 <- compute_ess(W1_hist[-(1:burnin)])
+		ess_W2 <- compute_ess(W2_hist[-(1:burnin)])
 		ess_theta1 <- compute_ess(theta1_hist[-(1:burnin), ])
-		ess_theta2 <- compute_ess(theta1_hist[-(1:burnin), ])
-		
+		ess_theta2 <- compute_ess(theta2_hist[-(1:burnin), ])
 		
 		# Effective Sample Size per second
-		
+		ess_sec_theta_01 <- ess_theta_01/elapsed_time
+		ess_sec_theta_02 <- ess_theta_02/elapsed_time
+		ess_sec_W1 <- ess_W1/elapsed_time
+		ess_sec_W2 <- ess_W2/elapsed_time
+		ess_sec_theta1_mean <- mean(ess_theta1/elapsed_time)
+		ess_sec_theta2_mean <- mean(ess_theta2/elapsed_time)
 		
 		# Geweke diagnostic
+		z_W1 <- compute_geweke(W1_hist[-(1:burnin)])
+		z_W2 <- compute_geweke(W2_hist[-(1:burnin)])
+		z_theta_01 <- compute_geweke(theta_01_hist[-(1:burnin)])
+		z_theta_02 <- compute_geweke(theta_02_hist[-(1:burnin)])
 		
+		z_theta1 <- compute_geweke(theta1_hist[-(1:burnin), ])
+		z_theta2 <- compute_geweke(theta2_hist[-(1:burnin), ])
+		z_theta1_out <- sum((z_theta1 < -1.96) | (z_theta1 > 1.96))/Tt
+		z_theta2_out <- sum((z_theta2 < -1.96) | (z_theta2 > 1.96))/Tt
 		
+		# Fit metrics
+		W1_mean <- mean(W1_hist[-(1:burnin)])
+		W1_median <- median(W1_hist[-(1:burnin)])
+		W2_mean <- mean(W2_hist[-(1:burnin)])
+		W2_median <- median(W2_hist[-(1:burnin)])
 		
+		theta1_mean <- colMeans(theta1_hist[-(1:burnin), ])
+		theta2_mean <- colMeans(theta2_hist[-(1:burnin), ])
+		lambda_mean <- exp(theta1_mean)
+
+		log_lik <- compute_loglik(y, lambda_mean)
+		rmse_theta1 <- compute_rmse(theta1_mean, theta1_true)
+		# TO-DO: Coverage of the Empirical CI
 		
-		# 
-		rmse_theta1   <- calcular_rmse(restheta1_hist, theta1_true)
-		cobertura     <- calcular_cobertura(resultado$theta1_hist, theta1_true)
-		geweke_z      <- geweke_agregado(resultado)
-		
-		
-		
-		# --- 3.4 montar linha de resultado (data.frame de 1 linha) ---
-		linha_resultado <- data.frame(
-			Tt             = Tt,
-			funcao        = funcao,
-			metodo        = metodo,
-			replica       = replica,
-			tempo_s       = tempo_total,
-			ess_theta1    = ess_theta1,
-			ess_W1        = ess_W1,
-			ess_W2        = ess_W2,
-			ess_theta1_s  = ess_theta1 / tempo_total,
-			rmse_theta1   = rmse_theta1,
-			cobertura     = cobertura,
-			geweke_z      = geweke_z,
+		#
+		# Save the results
+		#
+		task_result <- data.frame(
+			f = f,
+			Tt = Tt,
+			method = method,
+			replica = replica,
+			elapsed_time = elapsed_time,
+			
+			ess_theta_01 = ess_theta_01,
+			ess_theta_02 = ess_theta_02,
+			ess_W1 = ess_W1,
+			ess_W2 = ess_W2,
+			ess_theta1_mean = ess_theta1_mean,
+			ess_theta2_mean = ess_theta2_mean,
+			
+			ess_sec_theta_01 = ess_sec_theta_01,
+			ess_sec_theta_02 = ess_sec_theta_02,
+			ess_sec_W1 = ess_sec_W1,
+			ess_sec_W2 = ess_sec_W2,
+			ess_sec_theta1_mean = ess_sec_theta1_mean,
+			ess_sec_theta2_mean = ess_sec_theta2_mean,
+			
+			z_W1 = z_W1,
+			z_W2 = z_W2,
+			z_theta_01 = z_theta_01,
+			z_theta_02 = z_theta_02,
+			z_theta1_out = z_theta1_out,
+			z_theta2_out = z_theta2_out,
+			
+			W1_mean = W1_mean,
+			W1_median = W1_median,
+			W2_mean = W2_mean,  
+			W2_median = W2_median,
+			
+			log_lik = log_lik,
+			rmse_theta1 = rmse_theta1,
+			
 			stringsAsFactors = FALSE
 		)
 		
-		# --- 3.5 checkpoint: salva o resultado individual (resumo) em disco ---
-		saveRDS(linha_resultado, file = arquivo_saida)
-		
-		# Level two for star tasks
-		if (task$star) {
-			saveRDS(list(
-				theta1_hist = theta1_hist,
-				theta2_hist = theta2_hist,
-				W1_hist     = W1_hist,
-				W2_hist     = W2_hist
-			), file = file_name)
+		# Only for Montoril and Stan
+		if (method %in% c("montoril", "stan")) {
+			task_result$ac_hist = res$ac_hist
+		}
+
+		if (method == "pg_apf") {
+			task_result$ess_smc = res$ess_smc
 		}
 		
-		result=linha_resultado
+		if (method %in% c("sir_laplace", "sir_collapsed")) {
+			task_result$ess_is = res$ess_is
+			task_result$itr_irls = res$itr_irls
+		}
+		
+		if (method == "sir_collapsed") {
+			task_result$accepted1_hist <- res$accepted1_hist
+			task_result$accepted2_hist <- res$accepted2_hist
+		}
+		
+		saveRDS(task_result, file = task_result_file)
+		
+		# Level two - Star tasks
+		if (task$star) {
+			saveRDS(list(
+				W1_hist = W1_hist,
+				W2_hist = W2_hist,
+				theta_01_hist = theta_01_hist,
+				theta_02_hist = theta_02_hist,
+				theta1_hist = theta1_hist,
+				theta2_hist = theta2_hist
+			), file = task_star_result_file)
+		}
+		
+		result <- task_result
 	}
+	
 	return(result)
 }
 
 
-# 4. EXECUCAO (sequencial por enquanto) ########################################
-
-# Nesta etapa: for() simples, sequencial, so para validar que a estrutura
-# funciona ponta a ponta antes de paralelizar.
+#####
+# Sequential execution
 #
-# Cada chamada a rodar_tarefa() ja salva seu proprio resultado em disco
-# (bloco 3.5) e pula tarefas ja concluidas (bloco 3.0) -- entao interromper
-# e reiniciar este for() a qualquer momento e seguro, sem perder progresso
-# nem reprocessar tarefas ja feitas.
-#
-# Quando for paralelizar (ver bloco 4b comentado abaixo), a unica mudanca
-# necessaria e trocar este for() por foreach(...) %dorng% { rodar_tarefa(...) },
-# sem tocar em rodar_tarefa() nem no restante do script -- o checkpointing
-# por arquivo individual ja e seguro em paralelo, pois cada worker escreve
-# em seu proprio arquivo, nunca compartilhado com outro processo.
 
-resultados_lista <- vector("list", nrow(task_grid))
+result_list <- vector("list", grid_size)
 
-for (i in seq_len(nrow(task_grid))) {
-	cat(sprintf("Tarefa %d/%d: Tt=%d, funcao=%s, metodo=%s, replica=%d\n",
-	            i, nrow(task_grid),
-	            task_grid$Tt[i], task_grid$funcao[i],
-	            task_grid$metodo[i], task_grid$replica[i]))
+for (i in 1:grid_size) {
+	
+	printf("Running task %d/%d: f=%s, Tt=%d, method=%s,replica=%d",
+		   i,
+		   grid_size,
+		   task_grid$Tt[i], 
+		   task_grid$f[i],
+		   task_grid$method[i],
+		   task_grid$replica[i])
 
-	resultados_lista[[i]] <- rodar_tarefa(task_grid[i, ])
+	result_list[[i]] <- run_task(task_grid[i, ])
 }
 
-resultados <- do.call(rbind, resultados_lista)
+# Stack the results (1-row data.frame) in a single data.frame
+df_results <- do.call(rbind, result_list)
 
 
+#
+# Aggregate the results
+#
+file_rds <- sprintf("%s/simulation_results.rds", path_results) 
+saveRDS(df_results, file = file_rds)
 
-# 5. COMBINAR RESULTADOS PARCIAIS E SALVAR CONSOLIDADO #########################
+file_csv <- sprintf("%s/simulation_results.csv", path_results) 
+write.csv(df_results, file = file_csv, row.names = FALSE)
 
-# Le todos os arquivos individuais salvos em resultados/parcial/ e combina
-# num unico data.frame. Roda independente de como as tarefas foram executadas
-# (sequencial, interrompida e retomada, ou paralela) -- a fonte da verdade
-# sao os arquivos em disco, nao o objeto `resultados` em memoria.
-
-arquivos_parciais <- list.files(dir_parcial, pattern = "\\.rds$", full.names = TRUE)
-cat(sprintf("Arquivos parciais encontrados: %d de %d tarefas esperadas\n",
-            length(arquivos_parciais), nrow(task_grid)))
-
-resultados <- do.call(rbind, lapply(arquivos_parciais, readRDS))
-
-dir.create("resultados", showWarnings = FALSE)
-saveRDS(resultados, file = "resultados/resultados_grid_principal.rds")
-write.csv(resultados, file = "resultados/resultados_grid_principal.csv", row.names = FALSE)
-
-cat("Simulacao concluida.\n")
+printf("Simulation complete!")
