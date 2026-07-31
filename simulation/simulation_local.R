@@ -16,22 +16,13 @@ path_results <- "results"
 path_results_partial <- sprintf("%s/%s", path_results, "partial")
 path_results_star <- sprintf("%s/%s", path_results, "star")
 
-verbose <- TRUE   # print information in the console
-parallel <- TRUE  # used only in local mode (cluster = FALSE)
-n_cores <- 2      # used only in local mode (cluster = FALSE)
-
+verbose <- TRUE
+parallel <- TRUE
+n_cores <- 2
 
 # Print auxiliary function
 printf <- function(...) cat(paste(sprintf(...), "\n"))
 
-# ---- Execution environment auto-detection----
-# cluster = TRUE runs in multi-node PBS mode (Euler), with 1 worker per
-# physical core (no hyperthreading), pinned via taskset.
-# cluster = FALSE runs locally via a simple PSOCK cluster (n_cores).
-# Auto-detected from the presence of PBS_NODEFILE (this variable only
-# exists inside the execution of a PBS job).
-cluster <- Sys.getenv("PBS_NODEFILE") != ""
-if (cluster) parallel <- TRUE  # cluster mode implies parallel execution
 
 # General simulation parameters
 N <- 10000          # number of iterations
@@ -82,7 +73,7 @@ theta1_tilde_scal <- 0 # sir_laplace and sir_collapsed
 #####
 # Build the Task Grid 
 
-Tt_grid <- c(200, 400, 800, 1600)
+Tt_grid <- c(200)
 functions_grid <- c("quadratic")
 methods_grid <- c("montoril", "pg_apf", "sir_collapsed", "sir_laplace", "stan")
 
@@ -104,7 +95,7 @@ if (verbose) printf("Total of tasks: %d", grid_size)
 
 # Task stars: Store all simulated data for the (stars) selected functions and Tt 
 f_star <- "quadratic"
-Tt_star <- c(200, 1600)
+Tt_star <- c(200, 2000)
 
 task_grid$star <- with(task_grid,
 	replica == 1 & Tt %in% Tt_star & f == f_star
@@ -369,57 +360,6 @@ run_task <- function(task) {
 
 
 #####
-# Cluster infrastructure
-
-# Local mode: simple PSOCK cluster, n_cores on this same machine
-make_local_cluster <- function(n_cores) {
-	parallel::makeCluster(n_cores)
-}
-
-# Cluster mode (PBS/Euler): 1 worker per physical core (no hyperthreading),
-# pinned via taskset, spread across all nodes allocated to the job.
-# Each remote worker needs to redo the environment setup (modules, SSL/
-# toolchain variables), since the SSH session does not inherit the PBS
-# job's shell.
-make_pbs_cluster <- function() {
-	
-	nodefile <- Sys.getenv("PBS_NODEFILE")
-	if (nodefile == "") stop("PBS_NODEFILE is not set - is this running inside a PBS job?")
-	hosts <- unique(readLines(nodefile))
-
-	get_physical_cpu_ids <- function(host) {
-		remote_cmd <- "grep -E '^processor|^core id' /proc/cpuinfo"
-		out <- system2("ssh", args = c(host, shQuote(remote_cmd)), stdout = TRUE)
-		proc_ids <- as.integer(gsub(".*:\\s*", "", out[grepl("^processor", out)]))
-		core_ids <- as.integer(gsub(".*:\\s*", "", out[grepl("^core id", out)]))
-		df <- data.frame(processor = proc_ids, core = core_ids)
-		df <- df[!duplicated(df$core), ]
-		df$processor
-	}
-
-	cpu_map <- lapply(hosts, get_physical_cpu_ids)
-	names(cpu_map) <- hosts
-
-	worker_specs <- do.call(rbind, lapply(hosts, function(h) {
-		data.frame(host = h, cpu = cpu_map[[h]], stringsAsFactors = FALSE)
-	}))
-
-	if (verbose) printf("PBS cluster: %d nodes, %d workers (physical cores, no HT)",
-						 length(hosts), nrow(worker_specs))
-
-	make_pinned_worker <- function(host, cpu) {
-		parallel::makePSOCKcluster(host,
-			rscript = sprintf("bash -c 'source ~/setup_env.sh > /dev/null 2>&1 && taskset -c %d Rscript'", cpu))
-	}
-
-	workers <- mapply(make_pinned_worker,
-					   worker_specs$host, worker_specs$cpu,
-					   SIMPLIFY = FALSE)
-	do.call(c, workers)
-}
-
-
-#####
 # Main exection
 
 start_time = proc.time() # execution time
@@ -447,12 +387,12 @@ if (!parallel) {
 } else {
 	
 	# Parallel execution
-	if (verbose) printf("Starting parallel execution (cluster = %s)", cluster)
+	if (verbose) printf("Starting parallel execution")
 	current_wd <- getwd()
 	
 	`%dorng%` <- doRNG::`%dorng%`
 	
-	cl <- if (cluster) make_pbs_cluster() else make_local_cluster(n_cores)
+	cl <- parallel::makeCluster(n_cores)
 	doParallel::registerDoParallel(cl)
 	parallel::clusterExport(cl, "current_wd")
 	
