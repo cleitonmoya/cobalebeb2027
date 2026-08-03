@@ -4,9 +4,9 @@ export(sample_sir_collapsed) 	# sampler_sir_collapsed.R
 export(sample_sir_laplace)   	# sampler_sir_laplace.R
 export(sample_stan)          	# sampler_stan.R
 
-export(compute_ess)          	# metrics.R
-export(compute_geweke)       	# metrics.R
-export(compute_loglik)       	# metrics.R
-export(compute_rmse)         	# metrics.R
-export(compute_mae)          	# metrics.R
-export(compute_cov)          	# metrics.R
+export(metrics_ess)          	# metrics.R
+export(metrics_geweke)       	# metrics.R
+export(metrics_loglik)       	# metrics.R
+export(metrics_rmse)         	# metrics.R
+export(metrics_mae)          	# metrics.R
+export(metrics_theta1_ci)     	# metrics.R

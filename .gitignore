@@ -1,3 +1,4 @@
 cache/
 backup/
 simulation/results/star/
+simulation/pbs_script

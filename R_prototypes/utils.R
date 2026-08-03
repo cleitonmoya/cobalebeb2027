@@ -1,21 +1,60 @@
 # Common functions for the Poisson LTDM samplers
 
-# Used in: pg_apf, sir_laplace, sir_collapsed 
+# Used in: pg_as, sir_laplace, sir_collapsed
 logsumexp <- function(x) {
 	cc <- max(x)
 	return(cc + log(sum(exp(x - cc))))
 }
 
 
-# Used in: sampler_pg_apf, sir_laplace
+# Used in: pg_as (K-1 non-reference particles at each t)
+# Systematic resampling (Kitagawa, 1996): draws `ndraws` indices in 1:K from
+# (unnormalized) log-weights using a SINGLE uniform draw, instead of the
+# `ndraws` independent draws that sample(..., prob=) uses internally. A
+# single u0 ~ U(0, total/ndraws) determines `ndraws` equally-spaced points
+# u_j = u0 + total*j/ndraws, located via one monotone sweep through the
+# cumulative weights (findInterval). Unbiased, lower resampling variance
+# than multinomial (Doucet, de Freitas & Gordon, 2001).
+systematic_resample <- function(logw, ndraws) {
+	K <- length(logw)
+	m <- max(logw)
+	w <- exp(logw - m)
+	cum_w <- cumsum(w)
+	total <- cum_w[K]
+	u0 <- runif(1, 0, total / ndraws)
+	u <- u0 + total * (0:(ndraws - 1)) / ndraws
+	findInterval(u, cum_w, left.open = TRUE) + 1
+}
+
+
+# Used in: pg_as (ancestral sampling index, backward tracking seed),
+# sir_laplace, sir_collapsed (SIR resampling of theta1)
+# Single-index draw from (unnormalized) log-weights via inverse-CDF.
+# Deliberately NOT sample()/sample.int(prob=): base R's sample() internally
+# sorts the probabilities in decreasing order before walking the cumulative
+# sum (see src/main/random.c, ProbSampleReplace), so for the SAME uniform
+# draw it can land on a different index than a natural-order scan -- same
+# marginal distribution, different realized draw. This matters for matching
+# the C++ port (sample_index_from_logw() in utils.h), which uses a
+# natural-order scan.
+sample_one_from_logw <- function(logw) {
+	m <- max(logw)
+	w <- exp(logw - m)
+	cum_w <- cumsum(w)
+	findInterval(runif(1, 0, cum_w[length(cum_w)]), cum_w, left.open = TRUE) + 1
+}
+
+
+# Used in: pg_as, sir_laplace
 # Log-likelihood
 log_p_yt <- function(yt, theta_t1) {
 	res <- yt * theta_t1 - exp(theta_t1)
+	res[!is.finite(res)] <- -Inf
 	return(res)
 }
 
 
-# Used in: mh_montoril
+# Used in: amh_montoril
 gibbs_sample_theta01 <- function(mu_01, sigma2_01, theta_11, theta_02, W1) {
 	sigma2_01_bar <- (1/sigma2_01 + 1/W1)^(-1)
 	mu_01_bar <- sigma2_01_bar*(mu_01/sigma2_01 + (theta_11 - theta_02)/W1)
@@ -24,7 +63,7 @@ gibbs_sample_theta01 <- function(mu_01, sigma2_01, theta_11, theta_02, W1) {
 }
 
 
-# Used in: mh_montoril, pg_apf, sir_laplace, sir_collapsed
+# Used in: amh_montoril, pg_as, sir_laplace, sir_collapsed
 gibbs_sample_phi1 <- function(nu_01, eta_01, theta_01, theta1, theta_02, theta2, Tt) {
 	nu_01_bar <- nu_01 + Tt/2
 	dif1 <- theta1 - c(theta_01, theta1[-Tt])
@@ -35,7 +74,7 @@ gibbs_sample_phi1 <- function(nu_01, eta_01, theta_01, theta1, theta_02, theta2,
 }
 
 
-# Used in: mh_montoril, pg_apf, sir_laplace, sir_collapsed
+# Used in: amh_montoril, pg_as, sir_laplace, sir_collapsed
 gibbs_sample_phi2 <- function(nu_02, eta_02, theta_02, theta2, Tt) {
 	nu_02_bar <- nu_02 + Tt/2
 	diffs2 <- theta2 - c(theta_02, theta2[-Tt])
@@ -45,7 +84,7 @@ gibbs_sample_phi2 <- function(nu_02, eta_02, theta_02, theta2, Tt) {
 }
 
 
-# Used in: cwmh_sample_theta1 
+# Used in: amh_montoril (cwmh_sample_theta1)
 # Full conditional log-posterior for theta_t1, t=1, ..., T-1
 # theta_t1: theta_{t1}
 # theta_tm11: theta_{t-1,1}
@@ -64,7 +103,7 @@ logpost_theta_t1 <- function(theta_t1, theta_tm11, theta_tp11,
 }
 
 
-# Used in: cwmh_sample_theta1
+# Used in: amh_montoril (cwmh_sample_theta1)
 # Full conditional log-posterior for theta_T1 (t=T)
 logpost_theta_T1 <- function(theta_t1, theta_tm11, theta_tm12, yt, W1) {
 	p1 <- yt*theta_t1 - exp(theta_t1) # log-likelihood
@@ -74,7 +113,7 @@ logpost_theta_T1 <- function(theta_t1, theta_tm11, theta_tm12, yt, W1) {
 }
 
 
-# Used in: cwmh_sample_theta1 
+# Used in: amh_montoril (cwmh_sample_theta1)
 # Sample theta_t1 ~ logpost_theta_t1 (Metropolis step)
 # final_t: boolean (0: t<T; 1: t=T)
 sample_theta_t1_mh <- function(theta_t1_current, theta_tm11, theta_tp11,
@@ -112,7 +151,7 @@ sample_theta_t1_mh <- function(theta_t1_current, theta_tm11, theta_tp11,
 }
 
 
-# Used in: mh_montoril
+# Used in: amh_montoril
 # Sample theta1 using component-wise Metropolis (Random Walking)
 cwmh_sample_theta1 <- function(y, theta_01, theta_02, 
 							   theta1, theta2, W1, varsigma2, Tt) {
@@ -207,7 +246,7 @@ chan_build_chain <- function(n, first_node_order) {
 }
 
 
-# Used in: sampler_sir_collapsed's make_chan_theta2_smoother (W2 marginal
+# Used in: sir_collapsed's log_marginal_lik_w2 (W2 marginal
 # likelihood, theta_02 held fixed) - ANCHORED, T-dimensional block: T free
 # nodes with an externally fixed predecessor (theta_01 or theta_02 held fixed)
 chan_build_static_objects <- function(Tt) {
@@ -237,7 +276,7 @@ chan_log_det_K0 <- function(Tt) {
 }
 
 
-# Used in: sampler_amh_montoril, sampler_pg_apf, sampler_sir_laplace, sampler_sir_collapsed
+# Used in: amh_montoril, pg_as, sir_laplace, sir_collapsed
 # Sample (theta_02, theta2) JOINTLY via the extended, (T+1)-dimensional Chan
 # block: theta_02 is folded in as node "0" of the chain. theta_02's own
 # diagonal entry combines its Normal prior (1/sigma2_02) with the phi1
@@ -277,7 +316,7 @@ make_chan_theta2_smoother_ext <- function(Ttp1) {
 }
 
 
-# Used in: sampler_sir_laplace, sampler_sir_collapsed
+# Used in: sir_laplace, sir_collapsed
 # Laplace/IRLS approximation for (theta_01, theta1) JOINTLY via the extended,
 # (T+1)-dimensional Chan block: theta_01 is folded in as node "0" of the
 # chain. theta_01 needs no linearization itself (no likelihood) - only its
@@ -317,7 +356,7 @@ make_chan_theta1_smoother_ext <- function(Ttp1) {
 }
 
 
-# Used in: sampler_amh_montoril, sampler_pg_apf, sampler_sir_laplace, sampler_sir_collapsed
+# Used in: amh_montoril, pg_as, sir_laplace, sir_collapsed
 # It can be used with theta1 or theta2, ANCHORED (Tt) or extended (Ttp1) builds
 chan_sample_from_build <- function(build, Tt) {
 	

@@ -17,7 +17,7 @@
 # -----------------------------------------------------------------------------
 # 1. Settings
 # -----------------------------------------------------------------------------
-
+graphics.off()     # close the plots
 # Change de directory to the same of the current file
 setwd(dirname(normalizePath(sys.frames()[[1]]$ofile)))
 

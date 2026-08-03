@@ -82,14 +82,16 @@ theta1_tilde_scal <- 0 # sir_laplace and sir_collapsed
 #####
 # Build the Task Grid 
 
+# Used to build the grid and simulate
 Tt_grid <- c(200, 400, 800, 1600)
-functions_grid <- c("quadratic")
-methods_grid <- c("montoril", "pg_apf", "sir_collapsed", "sir_laplace", "stan")
+functions_grid <- c("constant","linear", "quadratic", "sinusoidal")
+methods_grid <- c("stan")
+N_replicas <- 10
 
-# Tt_grid <- c(200, 400, 800, 2000)
-# functions_grid <- c("constant", "linear", "quadratic", "sinusoidal")
-# methods_grid <- c("montoril", "pg_apf", "sir_collapsed", "sir_laplace", "stan")
-N_replicas <- 1
+# Only for reference (used to compute the seed)
+Tt_grid_ref <- c(200, 400, 800, 1600)
+functions_grid_ref <- c("constant","linear", "quadratic", "sinusoidal")
+methods_grid_ref <- c("montoril", "pg_apf", "sir_laplace", "sir_collapsed", "stan")
 
 task_grid <- expand.grid(
 	Tt = Tt_grid,
@@ -114,7 +116,10 @@ if (verbose) printf("Total of star tasks: %d", sum(task_grid$star))
 
 
 # Insert seed column
-task_grid$seed <- 1:grid_size
+task_grid$seed <- match(task_grid$method, methods_grid_ref) * 1e5 +
+					match(task_grid$f, functions_grid_ref) * 1e4 +
+					match(task_grid$Tt, Tt_grid_ref) * 1e3 +
+					task_grid$replica
 
 
 task_result_filename <- function(task) {
@@ -241,15 +246,27 @@ run_task <- function(task) {
 		# Compute the metrics of the replica
 		#
 		
+		# Samples without burn-in
+		theta_01_samples <- theta_01_hist[-(1:burnin)]
+		theta_02_samples <- theta_02_hist[-(1:burnin)]
+		W1_samples <- W1_hist[-(1:burnin)]
+		W2_samples <- W2_hist[-(1:burnin)]
+		theta1_samples <- theta1_hist[-(1:burnin), ]
+		theta2_samples <- theta2_hist[-(1:burnin), ]
+		
+		
 		# Effective Sample Size
-		ess_theta_01 <- compute_ess(theta_01_hist[-(1:burnin)])
-		ess_theta_02 <- compute_ess(theta_02_hist[-(1:burnin)])
-		ess_W1 <- compute_ess(W1_hist[-(1:burnin)])
-		ess_W2 <- compute_ess(W2_hist[-(1:burnin)])
-		ess_theta1 <- compute_ess(theta1_hist[-(1:burnin), ])
-		ess_theta2 <- compute_ess(theta2_hist[-(1:burnin), ])
+		ess_theta_01 <- metrics_ess(theta_01_samples)
+		ess_theta_02 <- metrics_ess(theta_02_samples)
+		ess_W1 <- metrics_ess(W1_samples)
+		ess_W2 <- metrics_ess(W2_samples)
+		ess_theta1 <- metrics_ess(theta1_samples)
 		ess_theta1_mean <- mean(ess_theta1)
+		ess_theta1_min <- min(ess_theta1)
+		
+		ess_theta2 <- metrics_ess(theta2_samples)
 		ess_theta2_mean <- mean(ess_theta2)
+		ess_theta2_min <- min(ess_theta2)
 		
 		# Effective Sample Size per second
 		ess_sec_theta_01 <- ess_theta_01/elapsed_time
@@ -260,28 +277,47 @@ run_task <- function(task) {
 		ess_sec_theta2_mean <- ess_theta2_mean/elapsed_time
 		
 		# Geweke diagnostic
-		z_W1 <- compute_geweke(W1_hist[-(1:burnin)])
-		z_W2 <- compute_geweke(W2_hist[-(1:burnin)])
-		z_theta_01 <- compute_geweke(theta_01_hist[-(1:burnin)])
-		z_theta_02 <- compute_geweke(theta_02_hist[-(1:burnin)])
+		z_W1 <- metrics_geweke(W1_samples)
+		z_W2 <- metrics_geweke(W2_samples)
+		z_theta_01 <- metrics_geweke(theta_01_samples)
+		z_theta_02 <- metrics_geweke(theta_02_samples)
 		
-		z_theta1 <- compute_geweke(theta1_hist[-(1:burnin), ])
-		z_theta2 <- compute_geweke(theta2_hist[-(1:burnin), ])
+		z_theta1 <- metrics_geweke(theta1_samples)
+		
 		z_theta1_out <- sum((z_theta1 < -1.96) | (z_theta1 > 1.96))/Tt
+		
+		z_theta2 <- metrics_geweke(theta2_samples)
+		
 		z_theta2_out <- sum((z_theta2 < -1.96) | (z_theta2 > 1.96))/Tt
 		
 		# Fit metrics
-		W1_mean <- mean(W1_hist[-(1:burnin)])
-		W1_median <- median(W1_hist[-(1:burnin)])
-		W2_mean <- mean(W2_hist[-(1:burnin)])
-		W2_median <- median(W2_hist[-(1:burnin)])
 		
-		theta1_mean <- colMeans(theta1_hist[-(1:burnin), ])
-		theta2_mean <- colMeans(theta2_hist[-(1:burnin), ])
+		
+		W1_mean <- mean(W1_samples)
+		W1_median <- median(W1_samples)
+		W1_var <- var(W1_samples)
+		
+		W2_mean <- mean(W2_samples)
+		W2_median <- median(W2_samples)
+		W2_var <- var(W2_samples)
+		
+		theta1_mean <- colMeans(theta1_samples)
+		theta2_mean <- colMeans(theta2_samples)
 		lambda_mean <- exp(theta1_mean)
 
-		log_lik <- compute_loglik(y, lambda_mean)
-		rmse_theta1 <- compute_rmse(theta1_mean, theta1_true)
+		log_lik <- metrics_loglik(y, lambda_mean)
+		rmse_theta1 <- metrics_rmse(theta1_mean, theta1_true)
+		mae_theta1 <- metrics_mae(theta1_mean, theta1_true)
+		
+		theta1_ci <- metrics_theta_ci(theta1_samples, 0.05)
+		theta1_ci_lower <- theta1_ci$ci_lower
+		theta1_ci_upper <- theta1_ci$ci_upper
+		
+		theta2_ci <- metrics_theta_ci(theta2_samples, 0.05)
+		theta2_ci_lower <- theta2_ci$ci_lower
+		theta2_ci_upper <- theta2_ci$ci_upper
+		
+		
 		# TO-DO: Coverage of the Empirical CI
 		
 		#
@@ -299,7 +335,9 @@ run_task <- function(task) {
 			ess_W1 = ess_W1,
 			ess_W2 = ess_W2,
 			ess_theta1_mean = ess_theta1_mean,
+			ess_theta1_min = ess_theta1_min,
 			ess_theta2_mean = ess_theta2_mean,
+			ess_theta2_min = ess_theta2_min,
 			
 			ess_sec_theta_01 = ess_sec_theta_01,
 			ess_sec_theta_02 = ess_sec_theta_02,
@@ -317,11 +355,20 @@ run_task <- function(task) {
 			
 			W1_mean = W1_mean,
 			W1_median = W1_median,
+			W1_var = W1_var,
 			W2_mean = W2_mean,  
 			W2_median = W2_median,
+			W2_var = W2_var,
 			
 			log_lik = log_lik,
 			rmse_theta1 = rmse_theta1,
+			mae_theta1 = mae_theta1,
+			
+			theta1_ci_lower = theta1_ci_lower,
+			theta1_ci_upper = theta1_ci_upper,
+			
+			theta2_ci_lower = theta2_ci_lower,
+			theta2_ci_upper = theta2_ci_upper,
 			
 			stringsAsFactors = FALSE
 		)
@@ -472,13 +519,5 @@ if (!parallel) {
 end_time <- proc.time()
 execution_time <- (end_time - start_time)[[3]]
 
-#####
-# Aggregate the results
-
-file_rds <- sprintf("%s/simulation_results.rds", path_results) 
-saveRDS(df_results, file = file_rds)
-
-file_csv <- sprintf("%s/simulation_results.csv", path_results) 
-write.csv(df_results, file = file_csv, row.names = FALSE)
-
 if (verbose) printf("Simulation complete in %.1f min", execution_time/60)
+
