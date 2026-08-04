@@ -221,7 +221,7 @@ run_task <- function(task) {
 				stop(sprintf("Unknow method: %s", method))
 			)
 		})
-		elapsed_time <- execution_bench[["elapsed"]]
+		elapsed_time <- execution_bench[["user.self"]]
 		if (verbose) printf("All tasks ran")
 		
 		

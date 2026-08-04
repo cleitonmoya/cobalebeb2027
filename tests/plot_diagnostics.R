@@ -11,18 +11,19 @@
 # added when the corresponding fields are present in `result` (ess_smc for
 # pg_as; ac_hist for amh_montoril; ess_is/itr_irls for sir_laplace;
 # accepted_hist/accepted2_hist/itr_irls/ess_is_hist/ess_sir_hist/ce1_*/ce2_*
-# for sir_collapsed) -- so this same function auto-adapts to whichever
-# algorithm's result list it is given, no `algorithm` argument needed.
+# for sir_collapsed).
 
-suppressMessages(library(coda))
+library(coda)
 
 print_and_plot_diagnostics <- function(result, y, theta1_true = NULL, theta2_true = NULL,
                                         t_obs, burnin, elapsed_time,
                                         nu_01 = NULL, eta_01 = NULL,
-                                        nu_02 = NULL, eta_02 = NULL) {
+                                        nu_02 = NULL, eta_02 = NULL,
+                                        ac_ref = NULL) {
 
     printf <- function(...) cat(paste(sprintf(...), "\n"))
-
+    
+    
     theta1_hist <- result$theta1_hist
     theta2_hist <- result$theta2_hist
     theta_01_hist <- result$theta_01_hist
@@ -35,7 +36,7 @@ print_and_plot_diagnostics <- function(result, y, theta1_true = NULL, theta2_tru
     theta1_present <- !is.null(theta1_true)
     theta2_present <- !is.null(theta2_true)
 
-    #####
+    
     # Summary stats
     theta1_mean <- colMeans(theta1_hist[-(1:burnin), ])
     theta2_mean <- colMeans(theta2_hist[-(1:burnin), ])
@@ -99,7 +100,6 @@ print_and_plot_diagnostics <- function(result, y, theta1_true = NULL, theta2_tru
         printf("CE Gamma proposal for phi2: shape=%.4f, rate=%.4f", result$ce2_shape, result$ce2_rate)
     }
 
-    #####
     # Plots
 
     x <- 1:Tt
@@ -187,12 +187,6 @@ print_and_plot_diagnostics <- function(result, y, theta1_true = NULL, theta2_tru
     plot(z_theta2, type = "l", main = expression("Geweke diagnostic for " * theta[t2]), xlab = "t", ylab = "Z score")
     abline(h = c(-1.96, 1.96), col = "red")
 
-    par(mfrow = c(2, 1), mar = c(4, 4, 2, 2), cex = 0.8)
-    for (t in t_obs) {
-        acf(theta1_hist[-(1:burnin), t], main = bquote(theta[.(t) * "," * 1]))
-        acf(theta2_hist[-(1:burnin), t], main = bquote(theta[.(t) * "," * 2]))
-    }
-
     if (!is.null(nu_02) && !is.null(eta_02)) {
         par(mfrow = c(1, 1), mar = c(4, 4, 2, 2), cex = 0.8)
         curve(dgamma(x, shape = nu_02, rate = eta_02), from = 1e-6, to = max(1 / W2_hist[-(1:burnin)]),
@@ -218,7 +212,7 @@ print_and_plot_diagnostics <- function(result, y, theta1_true = NULL, theta2_tru
         abline(v = burnin, col = "red")
     }
 
-    if (!is.null(result$ac_hist)) { # amh_montoril
+    if (!is.null(result$ac_hist) && !is.null(ac_ref)) { # amh_montoril
         roll_mean <- function(v, k) {
             n <- length(v); out <- rep(NA, n)
             for (i in k:n) out[i] <- mean(v[(i - k + 1):i])
@@ -227,7 +221,7 @@ print_and_plot_diagnostics <- function(result, y, theta1_true = NULL, theta2_tru
         par(mfrow = c(1, 1), mar = c(4, 4, 2, 2), cex = 0.8)
         plot(rowMeans(result$ac_hist), type = "l", xlab = "n", ylab = "ratio",
              main = expression("Acceptance ratio of " * theta[t * 1] * " (mean over t)"))
-        abline(h = 0.44, col = "blue", lty = 2)
+        abline(h = ac_ref, col = "blue", lty = 2)
         abline(v = burnin, col = "red")
     }
 
@@ -245,5 +239,5 @@ print_and_plot_diagnostics <- function(result, y, theta1_true = NULL, theta2_tru
         plot(result$ess_sir_hist, type = "l", main = "ESS - SIR theta1", xlab = "n")
     }
 
-    invisible(list(theta1_mean = theta1_mean, theta2_mean = theta2_mean, loglik = loglik))
+    return(NULL)
 }

@@ -95,7 +95,7 @@ sir_collapsed_r <- function(y, R_prerun, N,
         ch      <- res$ch
         W1 <- 1 / phi1
 
-        log_det_H <- 2 * as.numeric(determinant(ch, logarithm = TRUE)$modulus)
+        log_det_H <- 2 * as.numeric(determinant(ch, logarithm = TRUE, sqrt = TRUE)$modulus)
         th_lag2_fixed <- c(theta_02, theta2[-Tt])
         log_norm_H <- -Ttp1 / 2 * log(2 * pi) + 0.5 * log_det_H
 
@@ -133,7 +133,7 @@ sir_collapsed_r <- function(y, R_prerun, N,
         ch      <- irls_res$res$ch
         W1 <- 1 / phi1
 
-        log_det_H     <- 2 * as.numeric(determinant(ch, logarithm = TRUE)$modulus)
+        log_det_H     <- 2 * as.numeric(determinant(ch, logarithm = TRUE, sqrt = TRUE)$modulus)
         th_lag2_fixed <- c(theta_02, theta2[-Tt])
         log_norm_H    <- -Ttp1 / 2 * log(2 * pi) + 0.5 * log_det_H
 
@@ -184,7 +184,7 @@ sir_collapsed_r <- function(y, R_prerun, N,
         diffs2 <- theta2_hat - c(theta_02, theta2_hat[-Tt])
         log_p_theta2 <- -0.5 * Tt * log(2 * pi / phi2) + 0.5 * log_det_K0 - 0.5 * phi2 * sum(diffs2^2)
 
-        log_det_H <- 2 * as.numeric(determinant(ch, logarithm = TRUE)$modulus)
+        log_det_H <- 2 * as.numeric(determinant(ch, logarithm = TRUE, sqrt = TRUE)$modulus)
         log_q <- -0.5 * Tt * log(2 * pi) + 0.5 * log_det_H
 
         list(log_lik = log_pz + log_p_theta2 - log_q)
