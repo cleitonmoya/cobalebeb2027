@@ -20,9 +20,9 @@ Tt_grid <- c(200, 400, 800, 1600)
 function_grid <- c("constant", "linear", "quadratic", "sinusoidal")
 
 # ---- Choose method and data data here ----
-method <- method_grid[1]
+method <- method_grid[3]
 f <- function_grid[1]
-Tt <- Tt_grid[1] 
+Tt <- Tt_grid[4] 
 replica <- 1     # one of: 1,...,200     
 # ------------------------------------------
 
@@ -48,6 +48,7 @@ N <- 10000          # number of iterations
 burnin <- 1000
 verbose <- TRUE
 print_every <- 1000
+plots <- FALSE
 
 # Adaptive Metropolis hyperparameters (for montoril)
 ac_ref <- 0.44             # acceptance ratio target
@@ -143,4 +144,4 @@ print_and_plot_diagnostics(result, y,
                             t_obs = t_obs, burnin = burnin, elapsed_time = elapsed_time,
                             nu_01 = nu_01, eta_01 = eta_01,
                             nu_02 = nu_02, eta_02 = eta_02,
-                            ac_ref = ac_ref)
+                            ac_ref = ac_ref, plots=plots)

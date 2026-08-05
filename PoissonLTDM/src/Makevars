@@ -1,0 +1,27 @@
+# PoissonLTDM/src/Makevars
+#
+# Configuração de build para convergence.cpp (Rcpp + RcppArmadillo + FFTW3
+# + OpenMP). Os demais .cpp do pacote (amh_montoril, pg_as, sir_collapsed,
+# sir_laplace) não dependem de FFTW3 nem OpenMP -- estas flags só afetam a
+# compilação de convergence.cpp e a etapa de link final do pacote (todos os
+# .o são linkados juntos num único .so).
+#
+# FFTW3 foi instalado via `conda install -n r1 -c conda-forge fftw` (não
+# está disponível como pacote de sistema apt neste projeto). CONDA_PREFIX é
+# definido automaticamente quando o ambiente conda está ativo -- é o que
+# acontece sempre que R é iniciado via `r1` (RStudio ou Rscript), já que o
+# R em si vem desse ambiente. Fallback para o path padrão caso, por algum
+# motivo, a variável não esteja setada (ex: chamada não-interativa que não
+# herdou o ambiente).
+
+CONDA_PREFIX_FALLBACK = $(HOME)/miniconda3/envs/r1
+
+ifeq ($(CONDA_PREFIX),)
+  FFTW_PREFIX = $(CONDA_PREFIX_FALLBACK)
+else
+  FFTW_PREFIX = $(CONDA_PREFIX)
+endif
+
+PKG_CPPFLAGS = -I$(FFTW_PREFIX)/include
+PKG_CXXFLAGS = -fopenmp -std=c++17
+PKG_LIBS = -L$(FFTW_PREFIX)/lib -Wl,-rpath,$(FFTW_PREFIX)/lib -lfftw3 -fopenmp

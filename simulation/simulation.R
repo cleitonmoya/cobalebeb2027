@@ -9,7 +9,15 @@ rm(list = ls())     # clear the environment
 # Change de directory to the same of the current file
 setwd(dirname(normalizePath(sys.frames()[[1]]$ofile)))
 
-devtools::load_all("../PoissonLTDM") # package with the samplers
+# IMPORTANT: load_all() compiles C++ in DEBUG mode by default (-g -O0),
+# silently overriding any -O3 in PoissonLTDM/src/Makevars, causing a
+# ~4-5x slowdown of every sampler -- critical here since this is the main,
+# long-running simulation. Using pkgload::load_all() directly (not
+# devtools::load_all()) because devtools::load_all()'s `...` does not
+# reliably forward debug= to pkgload in this environment (devtools 2.5.2 /
+# pkgload 1.5.3), producing a "must be used" warning even though the
+# argument is valid.
+pkgload::load_all("../PoissonLTDM", debug = FALSE) # package with the samplers
 
 path_data <- "../data/simulated"
 path_results <- "results"
@@ -119,7 +127,7 @@ if (verbose) printf("Total of star tasks: %d", sum(task_grid$star))
 task_grid$seed <- match(task_grid$method, methods_grid_ref) * 1e5 +
 					match(task_grid$f, functions_grid_ref) * 1e4 +
 					match(task_grid$Tt, Tt_grid_ref) * 1e3 +
-					task_grid$replica
+					task_grid$replica * 10
 
 
 task_result_filename <- function(task) {
@@ -255,16 +263,18 @@ run_task <- function(task) {
 		theta2_samples <- theta2_hist[-(1:burnin), ]
 		
 		
-		# Effective Sample Size
-		ess_theta_01 <- metrics_ess(theta_01_samples)
-		ess_theta_02 <- metrics_ess(theta_02_samples)
-		ess_W1 <- metrics_ess(W1_samples)
-		ess_W2 <- metrics_ess(W2_samples)
-		ess_theta1 <- metrics_ess(theta1_samples)
+		# Effective Sample Size (bulk/tail; R_hat/Geweke not assessed per
+		# replica -- only during the pilot/calibration stage that sets N and
+		# burnin, using metrics_convergence() on a multi-chain run)
+		ess_theta_01 <- metrics_ess_single_chain(theta_01_samples)$ess_bulk
+		ess_theta_02 <- metrics_ess_single_chain(theta_02_samples)$ess_bulk
+		ess_W1 <- metrics_ess_single_chain(W1_samples)$ess_bulk
+		ess_W2 <- metrics_ess_single_chain(W2_samples)$ess_bulk
+		ess_theta1 <- metrics_ess_single_chain(theta1_samples)$ess_bulk
 		ess_theta1_mean <- mean(ess_theta1)
 		ess_theta1_min <- min(ess_theta1)
 		
-		ess_theta2 <- metrics_ess(theta2_samples)
+		ess_theta2 <- metrics_ess_single_chain(theta2_samples)$ess_bulk
 		ess_theta2_mean <- mean(ess_theta2)
 		ess_theta2_min <- min(ess_theta2)
 		
@@ -275,20 +285,6 @@ run_task <- function(task) {
 		ess_sec_W2 <- ess_W2/elapsed_time
 		ess_sec_theta1_mean <- ess_theta1_mean/elapsed_time
 		ess_sec_theta2_mean <- ess_theta2_mean/elapsed_time
-		
-		# Geweke diagnostic
-		z_W1 <- metrics_geweke(W1_samples)
-		z_W2 <- metrics_geweke(W2_samples)
-		z_theta_01 <- metrics_geweke(theta_01_samples)
-		z_theta_02 <- metrics_geweke(theta_02_samples)
-		
-		z_theta1 <- metrics_geweke(theta1_samples)
-		
-		z_theta1_out <- sum((z_theta1 < -1.96) | (z_theta1 > 1.96))/Tt
-		
-		z_theta2 <- metrics_geweke(theta2_samples)
-		
-		z_theta2_out <- sum((z_theta2 < -1.96) | (z_theta2 > 1.96))/Tt
 		
 		# Fit metrics
 		
@@ -309,11 +305,11 @@ run_task <- function(task) {
 		rmse_theta1 <- metrics_rmse(theta1_mean, theta1_true)
 		mae_theta1 <- metrics_mae(theta1_mean, theta1_true)
 		
-		theta1_ci <- metrics_theta_ci(theta1_samples, 0.05)
+		theta1_ci <- metrics_theta1_ci(theta1_samples, 0.05)
 		theta1_ci_lower <- theta1_ci$ci_lower
 		theta1_ci_upper <- theta1_ci$ci_upper
 		
-		theta2_ci <- metrics_theta_ci(theta2_samples, 0.05)
+		theta2_ci <- metrics_theta1_ci(theta2_samples, 0.05)
 		theta2_ci_lower <- theta2_ci$ci_lower
 		theta2_ci_upper <- theta2_ci$ci_upper
 		
@@ -345,13 +341,6 @@ run_task <- function(task) {
 			ess_sec_W2 = ess_sec_W2,
 			ess_sec_theta1_mean = ess_sec_theta1_mean,
 			ess_sec_theta2_mean = ess_sec_theta2_mean,
-			
-			z_W1 = z_W1,
-			z_W2 = z_W2,
-			z_theta_01 = z_theta_01,
-			z_theta_02 = z_theta_02,
-			z_theta1_out = z_theta1_out,
-			z_theta2_out = z_theta2_out,
 			
 			W1_mean = W1_mean,
 			W1_median = W1_median,
@@ -505,7 +494,9 @@ if (!parallel) {
 	
 	parallel::clusterEvalQ(cl, {
 		setwd(current_wd)
-		devtools::load_all("../PoissonLTDM")
+		# See comment near the top of this file: pkgload::load_all() with
+		# debug=FALSE avoids the ~4-5x DEBUG-mode slowdown in every worker.
+		pkgload::load_all("../PoissonLTDM", debug = FALSE)
 	})
 	
 	df_results <- foreach::foreach(

@@ -1,12 +1,17 @@
-export(sample_amh_montoril)   	# sampler_amh_montoril.R
-export(sample_pg_apf)        	# sampler_pg_apf.R
-export(sample_sir_collapsed) 	# sampler_sir_collapsed.R
-export(sample_sir_laplace)   	# sampler_sir_laplace.R
+useDynLib(PoissonLTDM, .registration = TRUE)
+
+export(amh_montoril_cpp)     	# src/amh_montoril.cpp
+export(pg_as_cpp)            	# src/pg_as.cpp
+export(sir_collapsed_cpp)    	# src/sir_collapsed.cpp
+export(sir_laplace_cpp)      	# src/sir_laplace.cpp
 export(sample_stan)          	# sampler_stan.R
 
-export(metrics_ess)          	# metrics.R
-export(metrics_geweke)       	# metrics.R
-export(metrics_loglik)       	# metrics.R
-export(metrics_rmse)         	# metrics.R
-export(metrics_mae)          	# metrics.R
-export(metrics_theta1_ci)     	# metrics.R
+export(rhat_ess_fast)        	# src/convergence.cpp
+
+export(metrics_convergence)  	     # metrics.R
+export(metrics_convergence_by_chain) # metrics.R
+export(metrics_ess_single_chain)     # metrics.R
+export(metrics_loglik)       	     # metrics.R
+export(metrics_rmse)         	     # metrics.R
+export(metrics_mae)          	     # metrics.R
+export(metrics_theta1_ci)     	     # metrics.R
