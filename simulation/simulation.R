@@ -305,11 +305,11 @@ run_task <- function(task) {
 		rmse_theta1 <- metrics_rmse(theta1_mean, theta1_true)
 		mae_theta1 <- metrics_mae(theta1_mean, theta1_true)
 		
-		theta1_ci <- metrics_theta1_ci(theta1_samples, 0.05)
+		theta1_ci <- metrics_theta_ci(theta1_samples, 0.05)
 		theta1_ci_lower <- theta1_ci$ci_lower
 		theta1_ci_upper <- theta1_ci$ci_upper
 		
-		theta2_ci <- metrics_theta1_ci(theta2_samples, 0.05)
+		theta2_ci <- metrics_theta_ci(theta2_samples, 0.05)
 		theta2_ci_lower <- theta2_ci$ci_lower
 		theta2_ci_upper <- theta2_ci$ci_upper
 		

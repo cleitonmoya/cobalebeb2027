@@ -63,7 +63,7 @@ burnin <- 1000
 plots <- TRUE
 compute_rhat <- TRUE
 compute_ess <- TRUE
-verbose <- FALSE     # TRUE: show all Stan output; FALSE: suppressed/invisible
+verbose <- TRUE     # TRUE: show all Stan output; FALSE: suppressed/invisible
 
 # Parallel execution of the N_chains chains.
 #

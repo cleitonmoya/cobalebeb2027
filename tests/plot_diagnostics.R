@@ -223,7 +223,12 @@ print_and_plot_diagnostics <- function(result_list, y, changepoints,
     # Algorithm-specific summary lines (selected chain only)
     if (!is.null(result$ac_hist)) {
         printf("Mean acceptance ratio of theta1: %.2f", mean(result$ac_hist))
-        printf("Mean acceptance ratio of theta1 at changepoints: %.2f", mean(result$ac_hist[, changepoints]))
+        if (is.null(dim(result$ac_hist))) { 
+            ac_mean <- mean(result$ac_hist[changepoints])
+        } else {
+            ac_mean <- mean(result$ac_hist[, changepoints])
+        }
+        printf("Mean acceptance ratio of theta1 at changepoints: %.2f", ac_mean)
     }
     if (!is.null(result$accepted_hist)) {
         printf("W1 MH acceptance rate: %.3f", mean(result$accepted_hist))
@@ -411,5 +416,137 @@ print_and_plot_diagnostics <- function(result_list, y, changepoints,
         }
     }
     
-    return(NULL)
+    # ---- Return computed diagnostics (no recomputation needed by callers) ----
+    #
+    # Every value printed to the console above is captured here, unchanged --
+    # nothing new is computed. NULL where the corresponding compute_*/optional
+    # block did not run (e.g. ess_w1_tail is NULL when compute_ess = FALSE;
+    # ac_ratio_mean is NULL for methods other than amh_montoril). rhat_max and
+    # ess_bulk_min are convenience aggregates (worst-case R_hat across all
+    # scalar and time-indexed parameters; worst-case ESS bulk across all
+    # chains/parameters) for callers that only need a one-number pass/fail
+    # summary, e.g. calibration_phase.R.
+    out <- list(
+        # ---- Fit summary (selected/plot_chain only) ----
+        W1_mean = mean(W1_hist[-(1:burnin)]),
+        W1_median = median(W1_hist[-(1:burnin)]),
+        W2_mean = mean(W2_hist[-(1:burnin)]),
+        W2_median = median(W2_hist[-(1:burnin)]),
+        loglik = loglik,
+
+        # ---- R_hat (pooled across chains) ----
+        rhat_theta01 = if (compute_rhat) rhat_theta01 else NULL,
+        rhat_theta02 = if (compute_rhat) rhat_theta02 else NULL,
+        rhat_w1      = if (compute_rhat) rhat_w1 else NULL,
+        rhat_w2      = if (compute_rhat) rhat_w2 else NULL,
+        rhat_theta1       = if (compute_rhat) rhat_theta1 else NULL,       # length Tt
+        rhat_theta1_mean  = if (compute_rhat) mean(rhat_theta1) else NULL,
+        rhat_theta1_max   = if (compute_rhat) max(rhat_theta1) else NULL,
+        rhat_theta2       = if (compute_rhat) rhat_theta2 else NULL,       # length Tt
+        rhat_theta2_mean  = if (compute_rhat) mean(rhat_theta2) else NULL,
+        rhat_theta2_max   = if (compute_rhat) max(rhat_theta2) else NULL,
+        rhat_max     = if (compute_rhat) {
+            max(rhat_theta01, rhat_theta02, rhat_w1, rhat_w2, rhat_theta1, rhat_theta2)
+        } else NULL,
+
+        # ---- ESS bulk/tail, PER CHAIN (all N_chains) ----
+        ess_theta01 = if (compute_ess) ess_theta01 else NULL,               # length N_chains
+        ess_theta01_tail = if (compute_ess) ess_theta01_tail else NULL,
+        ess_theta01_cv   = if (compute_ess) sd(ess_theta01) / mean(ess_theta01) * 100 else NULL,
+        ess_theta02 = if (compute_ess) ess_theta02 else NULL,
+        ess_theta02_tail = if (compute_ess) ess_theta02_tail else NULL,
+        ess_theta02_cv   = if (compute_ess) sd(ess_theta02) / mean(ess_theta02) * 100 else NULL,
+        ess_w1 = if (compute_ess) ess_w1 else NULL,
+        ess_w1_tail = if (compute_ess) ess_w1_tail else NULL,
+        ess_w1_cv   = if (compute_ess) sd(ess_w1) / mean(ess_w1) * 100 else NULL,
+        ess_w2 = if (compute_ess) ess_w2 else NULL,
+        ess_w2_tail = if (compute_ess) ess_w2_tail else NULL,
+        ess_w2_cv   = if (compute_ess) sd(ess_w2) / mean(ess_w2) * 100 else NULL,
+
+        ess_theta1_bychain = if (compute_ess) ess_theta1_bychain else NULL,           # Tt x N_chains
+        ess_theta1_tail_bychain = if (compute_ess) ess_theta1_tail_bychain else NULL,
+        ess_theta1_mean_over_t = if (compute_ess) colMeans(ess_theta1_bychain) else NULL,           # length N_chains
+        ess_theta1_mean_over_t_tail = if (compute_ess) colMeans(ess_theta1_tail_bychain) else NULL,
+        ess_theta1_mean_over_t_cv = if (compute_ess) {
+            sd(colMeans(ess_theta1_bychain)) / mean(colMeans(ess_theta1_bychain)) * 100
+        } else NULL,
+        ess_theta1_min_over_t = if (compute_ess) apply(ess_theta1_bychain, 2, min) else NULL,       # length N_chains
+        ess_theta1_min_over_t_tail = if (compute_ess) apply(ess_theta1_tail_bychain, 2, min) else NULL,
+        ess_theta1_min_over_t_cv = if (compute_ess) {
+            sd(apply(ess_theta1_bychain, 2, min)) / mean(apply(ess_theta1_bychain, 2, min)) * 100
+        } else NULL,
+
+        ess_theta2_bychain = if (compute_ess) ess_theta2_bychain else NULL,
+        ess_theta2_tail_bychain = if (compute_ess) ess_theta2_tail_bychain else NULL,
+        ess_theta2_mean_over_t = if (compute_ess) colMeans(ess_theta2_bychain) else NULL,
+        ess_theta2_mean_over_t_tail = if (compute_ess) colMeans(ess_theta2_tail_bychain) else NULL,
+        ess_theta2_mean_over_t_cv = if (compute_ess) {
+            sd(colMeans(ess_theta2_bychain)) / mean(colMeans(ess_theta2_bychain)) * 100
+        } else NULL,
+        ess_theta2_min_over_t = if (compute_ess) apply(ess_theta2_bychain, 2, min) else NULL,
+        ess_theta2_min_over_t_tail = if (compute_ess) apply(ess_theta2_tail_bychain, 2, min) else NULL,
+        ess_theta2_min_over_t_cv = if (compute_ess) {
+            sd(apply(ess_theta2_bychain, 2, min)) / mean(apply(ess_theta2_bychain, 2, min)) * 100
+        } else NULL,
+
+        ess_bulk_min = if (compute_ess) {
+            min(ess_theta01, ess_theta02, ess_w1, ess_w2,
+                ess_theta1_bychain, ess_theta2_bychain)
+        } else NULL,
+
+        # ---- ESS / second (chain = plot_chain, elapsed_time = total for all chains) ----
+        # Guarded by the same condition as the console printout above:
+        # elapsed_time may be missing/NULL if the caller omits it.
+        ess_sec_w1_bulk = if (compute_ess && !missing(elapsed_time) && !is.null(elapsed_time)) {
+            ess_w1[plot_chain] / elapsed_time
+        } else NULL,
+        ess_sec_w1_tail = if (compute_ess && !missing(elapsed_time) && !is.null(elapsed_time)) {
+            ess_w1_tail[plot_chain] / elapsed_time
+        } else NULL,
+        ess_sec_w2_bulk = if (compute_ess && !missing(elapsed_time) && !is.null(elapsed_time)) {
+            ess_w2[plot_chain] / elapsed_time
+        } else NULL,
+        ess_sec_w2_tail = if (compute_ess && !missing(elapsed_time) && !is.null(elapsed_time)) {
+            ess_w2_tail[plot_chain] / elapsed_time
+        } else NULL,
+        ess_sec_theta1_mean_bulk = if (compute_ess && !missing(elapsed_time) && !is.null(elapsed_time)) {
+            mean(ess_theta1 / elapsed_time)
+        } else NULL,
+        ess_sec_theta1_mean_tail = if (compute_ess && !missing(elapsed_time) && !is.null(elapsed_time)) {
+            mean(ess_theta1_tail / elapsed_time)
+        } else NULL,
+        ess_sec_theta1_min_bulk  = if (compute_ess && !missing(elapsed_time) && !is.null(elapsed_time)) {
+            min(ess_theta1 / elapsed_time)
+        } else NULL,
+        ess_sec_theta1_min_tail  = if (compute_ess && !missing(elapsed_time) && !is.null(elapsed_time)) {
+            min(ess_theta1_tail / elapsed_time)
+        } else NULL,
+        ess_sec_theta2_mean_bulk = if (compute_ess && !missing(elapsed_time) && !is.null(elapsed_time)) {
+            mean(ess_theta2 / elapsed_time)
+        } else NULL,
+        ess_sec_theta2_mean_tail = if (compute_ess && !missing(elapsed_time) && !is.null(elapsed_time)) {
+            mean(ess_theta2_tail / elapsed_time)
+        } else NULL,
+        ess_sec_theta2_min_bulk  = if (compute_ess && !missing(elapsed_time) && !is.null(elapsed_time)) {
+            min(ess_theta2 / elapsed_time)
+        } else NULL,
+        ess_sec_theta2_min_tail  = if (compute_ess && !missing(elapsed_time) && !is.null(elapsed_time)) {
+            min(ess_theta2_tail / elapsed_time)
+        } else NULL,
+
+        # ---- Algorithm-specific summary values (selected chain only) ----
+        ac_ratio_mean = if (!is.null(result$ac_hist)) mean(result$ac_hist) else NULL,          # amh_montoril
+        ac_ratio_at_changepoints = if (!is.null(result$ac_hist)) {
+            if (is.null(dim(result$ac_hist))) mean(result$ac_hist[changepoints])
+            else mean(result$ac_hist[, changepoints])
+        } else NULL,
+        w1_mh_acceptance_rate = if (!is.null(result$accepted_hist)) mean(result$accepted_hist) else NULL,   # sir_collapsed
+        w2_mh_acceptance_rate = if (!is.null(result$accepted2_hist)) mean(result$accepted2_hist) else NULL, # sir_collapsed
+        ce1_shape = if (!is.null(result$ce1_shape)) result$ce1_shape else NULL,  # sir_collapsed
+        ce1_rate  = if (!is.null(result$ce1_shape)) result$ce1_rate else NULL,
+        ce2_shape = if (!is.null(result$ce2_shape)) result$ce2_shape else NULL,
+        ce2_rate  = if (!is.null(result$ce2_shape)) result$ce2_rate else NULL
+    )
+
+    return(out)
 }
