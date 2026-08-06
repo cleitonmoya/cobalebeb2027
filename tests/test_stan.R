@@ -63,6 +63,7 @@ burnin <- 1000
 plots <- TRUE
 compute_rhat <- TRUE
 compute_ess <- TRUE
+verbose <- FALSE     # TRUE: show all Stan output; FALSE: suppressed/invisible
 
 # Parallel execution of the N_chains chains.
 #
@@ -196,7 +197,8 @@ stan_out <- sample_stan(
     nu_01      = nu_01,
     eta_01     = eta_01,
     nu_02      = nu_02,
-    eta_02     = eta_02)
+    eta_02     = eta_02,
+    verbose    = verbose)
 
 elapsed_time <- as.numeric(Sys.time() - start_time, units = "secs")
 printf("Total wall-clock time (%d chains, parallel, %d cores): %.2f s",

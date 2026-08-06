@@ -5,7 +5,7 @@
 
 sample_stan <- function(model, y, N, burnin, seed, N_chains, n_cores, chain_inits,
 						mu_01, sigma2_01, mu_02, sigma2_02,
-						nu_01, eta_01, nu_02, eta_02){
+						nu_01, eta_01, nu_02, eta_02, verbose = FALSE){
 
 	Tt <- length(y)
 
@@ -37,22 +37,36 @@ sample_stan <- function(model, y, N, burnin, seed, N_chains, n_cores, chain_init
 		)
 	})
 
-	invisible(capture.output(
-		fit <- suppressWarnings(
-			rstan::sampling(
-				object  = model,
-				data    = stan_data,
-				chains  = N_chains,
-				cores   = n_cores,
-				iter    = N,
-				warmup  = burnin,
-				thin    = 1,
-				seed    = seed,
-				init    = initial_values,
-				refresh = 0
-			)
+	if (verbose) {
+		fit <- rstan::sampling(
+			object  = model,
+			data    = stan_data,
+			chains  = N_chains,
+			cores   = n_cores,
+			iter    = N,
+			warmup  = burnin,
+			thin    = 1,
+			seed    = seed,
+			init    = initial_values
 		)
-	))
+	} else {
+		invisible(capture.output(
+			fit <- suppressWarnings(
+				rstan::sampling(
+					object  = model,
+					data    = stan_data,
+					chains  = N_chains,
+					cores   = n_cores,
+					iter    = N,
+					warmup  = burnin,
+					thin    = 1,
+					seed    = seed,
+					init    = initial_values,
+					refresh = 0
+				)
+			)
+		))
+	}
 
 	warmup_time <- rstan::get_elapsed_time(fit)[, 1]
 	sample_time <- rstan::get_elapsed_time(fit)[, 2]
