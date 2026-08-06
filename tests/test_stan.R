@@ -1,34 +1,77 @@
-library(coda)
+# tests/test_stan.R
+#
+# Runs the Stan (NUTS) sampler on the real simulated dataset, printing and
+# plotting the same diagnostic battery as test_cpp.R -- same data, same
+# hyperparameters/initial values, so Stan is directly comparable by eye and
+# by metric to the other four samplers.
+#
+# Runs N_chains chains with dispersed initializations (see
+# make_chain_inits() below, identical to test_cpp.R) and passes all of them
+# to print_and_plot_diagnostics(), which computes R_hat/ESS across chains
+# and plots only the chain selected via `plot_chain`.
+#
+# Unlike test_cpp.R, chains are NOT parallelized via foreach/makeCluster
+# here: rstan::sampling()'s own chains=/cores= arguments already run the
+# N_chains chains in parallel internally (one process per chain), which is
+# more efficient than spawning N_chains separate rstan::sampling(chains=1)
+# calls -- so sample_stan() takes the full list of chain_inits and returns
+# all N_chains results in one call.
 
-# Change de directory to the same of the current file
-setwd(dirname(normalizePath(sys.frames()[[1]]$ofile)))
+rm(list = ls())
+options(error = function() traceback(2))
+setwd(dirname(this.path::this.path()))
 
-rm(list = ls())     # clear the environment
-seed <- 42          # used for Stan 
-set.seed(seed)      # alse used for stan for initialization, if not specified
+# See test_cpp.R for why debug=FALSE matters here (elapsed_time feeds
+# directly into ESS/second diagnostics further down).
+pkgload::load_all("../PoissonLTDM", debug = FALSE)
 
-source("../PoissonLTDM/R/utils.R")
 source("../PoissonLTDM/R/sampler_stan.R")
+source("plot_diagnostics.R")
 
-# Print auxiliary function
 printf <- function(...) cat(paste(sprintf(...), "\n"))
 
+method_grid <- c("amh_montoril", "pg_as", "sir_laplace", "sir_collapsed", "stan")
+Tt_grid <- c(200, 400, 800, 1600)
+function_grid <- c("constant", "linear", "quadratic", "sinusoidal")
+
+# ---- Choose method and data data here ----
+method <- method_grid[5]
+f <- function_grid[3]
+Tt <- Tt_grid[4]
+replica <- 1     # one of: 1,...,200
+# ------------------------------------------
+
 # Load the data
-filename <- "quadratic_2000_1"
-data <- readRDS(paste("../data/simulated/", filename, ".rds", sep=""))
-printf("Data: %s", filename)
-
+source_name <- sprintf("%s_%s_%s", f, Tt, replica)
+data <- readRDS(paste("../data/simulated/", source_name, ".rds", sep = ""))
 y <- data$y
-Tt <- length(y)
-if (Tt == 200) t_obs <- c(50, 100, 150, 175)
-if (Tt == 400) t_obs <- c(75, 100, 200, 300)
-if (Tt == 800) t_obs <- c(200, 300, 500, 700)
-if (Tt == 2000) t_obs <- c(500, 1000, 1500, 1750)
 theta1_true <- data$theta
+changepoints <- c(0.25, 0.5, 0.75)*Tt
 
-# Simulation parameters
-N <- 10000           # number of steps
-burnin <- 1000       # number of burn-in steps
+# Compute the seed (based on pattern)
+method_idx <- match(method, method_grid)
+Tt_idx <- match(Tt, Tt_grid)
+f_idx <- match(f, function_grid)
+seed_base <- method_idx*1e5 + f_idx*1e4 + Tt_idx*1e3 + replica*10
+
+# ---- Parameters and initialization ----
+# General simulation parameters
+N_chains <- 3        # number of chains
+plot_chain <- 1      # which chain (1..N_chains) to plot / trace in detail
+N <- 11000           # number of iterations (Stan: total, i.e. warmup + post-warmup)
+burnin <- 1000
+plots <- TRUE
+compute_rhat <- TRUE
+compute_ess <- TRUE
+
+# Parallel execution of the N_chains chains.
+#
+# Stan chains are parallelized natively via rstan::sampling(chains=,
+# cores=), not via foreach/makeCluster (see file header). n_cores = NULL
+# (default) picks the number of PHYSICAL cores automatically, same
+# resolve_n_cores() logic as test_cpp.R. Set n_cores explicitly (e.g.
+# n_cores = N_chains) to override.
+n_cores <- NULL
 
 # Prior hyperparameters
 # theta_01 ~ N(mu_01, sigma2_01)
@@ -47,122 +90,131 @@ eta_01 <- 0.01
 nu_02  <- 2
 eta_02 <- 0.0001
 
-# Initialization
-W2 <- 0.01
-W1 <- 0.01
-theta_01 <- 0
-theta_02 <- 0
-theta1 <- numeric(Tt)
-theta2 <- numeric(Tt)
+printf("Running %s for %s, seed_base=%d, N=%d, burnin=%d",
+       method, source_name, seed_base, N, burnin)
 
 
-#####
-# Prepare STAN 
-options(mc.cores = 1)
+# ---- Chain initialization ----
+#
+# Reference values derived from the data (method-of-moments style), used
+# only as the CENTER around which each chain's starting point is dispersed.
+# Not used directly as an initial value in any chain. Identical scheme to
+# test_cpp.R, so Stan's initialization is directly comparable to the other
+# samplers.
+theta1_ref <- log(y + 0.5)
+theta2_ref <- c(diff(theta1_ref), 0)
+theta_01_ref <- theta1_ref[1]
+theta_02_ref <- theta2_ref[1]
+W1_ref <- var(diff(theta1_ref))
+W2_ref <- var(diff(theta2_ref))
+
+make_chain_inits <- function(chain_id, seed) {
+    set.seed(seed)
+
+    theta_01_init <- theta_01_ref + rnorm(1, 0, sd = 2 * sqrt(abs(theta_01_ref) + 1))
+    theta_02_init <- theta_02_ref + rnorm(1, 0, sd = 2 * sqrt(abs(theta_02_ref) + 1))
+    W1_init <- W1_ref * exp(rnorm(1, 0, sd = 1))
+    W2_init <- W2_ref * exp(rnorm(1, 0, sd = 1))
+
+    theta1_init <- numeric(Tt) # Stan explores theta1 via HMC starting from
+                                # this initial value -- kept at zero, as in
+                                # sir_laplace/sir_collapsed, since Stan's
+                                # own warmup adaptation (step size, mass
+                                # matrix) handles finding the typical set
+                                # regardless of this starting point
+    theta2_init <- numeric(Tt)
+
+    list(chain_id = chain_id, seed = seed,
+         theta_01 = theta_01_init, theta_02 = theta_02_init,
+         W1 = W1_init, W2 = W2_init,
+         theta1 = theta1_init, theta2 = theta2_init)
+}
+
+chain_inits <- lapply(1:N_chains, function(k) make_chain_inits(k, seed_base + (k - 1)))
+
+
+# ---- Physical core count (used when n_cores is not set explicitly) ----
+# Same resolve_n_cores() as test_cpp.R.
+resolve_n_cores <- function(n_cores, N_chains) {
+    if (!is.null(n_cores)) return(n_cores)
+
+    phys <- NA_integer_
+    if (Sys.info()[["sysname"]] == "Linux" && nzchar(Sys.which("lscpu"))) {
+        out <- tryCatch(
+            system("lscpu -p=CORE,SOCKET 2>/dev/null | grep -v '^#'", intern = TRUE),
+            error = function(e) character(0)
+        )
+        if (length(out) > 0) phys <- length(unique(out)) # distinct (core,socket) pairs
+    }
+
+    if (is.na(phys)) phys <- parallel::detectCores(logical = FALSE)
+
+    if (is.na(phys)) {
+        logi <- parallel::detectCores(logical = TRUE)
+        phys <- max(1, logi %/% 2)
+        printf("Physical core count unavailable from OS; falling back to floor(logical/2) = %d", phys)
+    }
+    min(phys, N_chains) # no point requesting more workers than chains
+}
+n_cores_used <- resolve_n_cores(n_cores, N_chains)
+printf("Running %d chains in parallel on %d cores (Stan native chains=/cores=)", N_chains, n_cores_used)
+
+
+# ---- Prepare Stan model ----
+options(mc.cores = n_cores_used)
 rstan::rstan_options(auto_write = FALSE)
 
-# Load or compile the model
 if (file.exists("../cache/poisson_ltdm.rds")) {
-	model <- readRDS("../cache/poisson_ltdm.rds")
+    model <- readRDS("../cache/poisson_ltdm.rds")
 } else {
-	printf("Building the model")
-	file <- "../PoissonLTDM/inst/stan/poisson_ltdm.stan"
-	model <- rstan::stan_model(file = file, model_name = "PoissonLTDM")
-	saveRDS(model, file = "../cache/poisson_ltdm.rds")
+    printf("Building the model")
+    stan_file <- "../PoissonLTDM/inst/stan/poisson_ltdm.stan"
+    model <- rstan::stan_model(file = stan_file, model_name = "PoissonLTDM")
+    saveRDS(model, file = "../cache/poisson_ltdm.rds")
 }
 
-execution_bench <- system.time({
-res <- sample_stan(
-			model        = model, 
-	        y            = y,
-			N            = N,
-			burnin       = burnin,
-			seed         = seed,
-			mu_01        = mu_01,
-			sigma2_01    = sigma2_01,
-			mu_02        = mu_02,
-			sigma2_02    = sigma2_02,
-			nu_01        = nu_01,
-			eta_01       = eta_01,
-			nu_02        = nu_02,
-			eta_02       = eta_02,
-			W1           = W1,
-			W2           = W2,
-			theta_01     = theta_01,
-			theta_02     = theta_02,
-			theta1       = theta1,
-			theta2       = theta2)
-})
-elapsed_time <- execution_bench[["elapsed"]]
-printf("Elapsed time: %.2f s", elapsed_time)
 
-theta_01_hist <- res$theta_01_hist
-theta_02_hist <- res$theta_02_hist
-W1_hist       <- res$W1_hist
-W2_hist       <- res$W2_hist
-theta1_hist   <- res$theta1_hist
-theta2_hist   <- res$theta2_hist
-ac_hist       <- res$ac_hist
-elapsed_time2 <- res$elapsed_time
-fit           <- res$fit
+# NOTE: elapsed_time below uses wall-clock time (Sys.time()), not
+# proc.time()'s user.self field -- consistent with test_cpp.R, and
+# necessary here too since rstan::sampling(cores=) runs chains in separate
+# processes.
+start_time <- Sys.time()
 
-#####
-theta1_mean <- colMeans(theta1_hist[-(1:burnin), ])
-theta2_mean <- colMeans(theta2_hist[-(1:burnin), ])
-lambda_mean <- exp(theta1_mean)
+stan_out <- sample_stan(
+    model      = model,
+    y          = y,
+    N          = N,
+    burnin     = burnin,
+    seed       = seed_base,
+    N_chains   = N_chains,
+    n_cores    = n_cores_used,
+    chain_inits = chain_inits,
+    mu_01      = mu_01,
+    sigma2_01  = sigma2_01,
+    mu_02      = mu_02,
+    sigma2_02  = sigma2_02,
+    nu_01      = nu_01,
+    eta_01     = eta_01,
+    nu_02      = nu_02,
+    eta_02     = eta_02)
 
-printf("Elapsed time by STAN: %.2f s", elapsed_time2)
-printf("W1 mean: %.5f", mean(W1_hist[-(1:burnin)]))
-printf("W1 median: %.5f", median(W1_hist[-(1:burnin)]))
-printf("W2 mean: %.5f", mean(W2_hist[-(1:burnin)]))
-printf("W2 median: %.5f", median(W2_hist[-(1:burnin)]))
+elapsed_time <- as.numeric(Sys.time() - start_time, units = "secs")
+printf("Total wall-clock time (%d chains, parallel, %d cores): %.2f s",
+       N_chains, n_cores_used, elapsed_time)
 
-loglik <- sum(dpois(y, lambda_mean, log=TRUE))
-printf("Log-likelihood: %.2f", loglik)
+results <- stan_out$results
 
-# Effective sample size
-ess_theta01 <- effectiveSize(mcmc(theta_01_hist[-(1:burnin)]))
-ess_theta02 <- effectiveSize(mcmc(theta_02_hist[-(1:burnin)]))
-ess_w1 <- effectiveSize(mcmc(W1_hist[-(1:burnin)]))
-ess_w2 <- effectiveSize(mcmc(W2_hist[-(1:burnin)]))
-ess_theta1 <- effectiveSize(mcmc(theta1_hist[-(1:burnin),]))
-ess_theta2 <- effectiveSize(mcmc(theta2_hist[-(1:burnin),]))
-printf("Effective Sample Size:")
-printf("\ttheta_01: %.2f", ess_theta01)
-printf("\ttheta_02: %.2f", ess_theta02)
-printf("\tW1: %.0f", ess_w1)
-printf("\tW2: %.0f", ess_w2)
-printf("\ttheta1 (mean): %.2f", mean(ess_theta1))
-printf("\ttheta_11 %.2f", ess_theta1[1])
-printf("\ttheta2 (mean): %.2f", mean(ess_theta2))
+if (Tt == 200) t_obs <- c(50, 100, 150, 175)
+if (Tt == 400) t_obs <- c(75, 100, 200, 300)
+if (Tt == 800) t_obs <- c(100, 300, 500, 700)
+if (Tt == 1600) t_obs <- c(400, 800, 1200, 1600)
 
-# y, theta1_true, theta1_mean ####
-x <- 1:Tt
-par(mfrow=c(1,1), mar=c(4,4,2,2), cex=0.8)
-ylim_range <- range(theta1_mean, theta1_true)
-plot(x, theta1_mean, type="l", col="red", lwd=2, ylim=ylim_range,
-	 xlab="t", ylab="", main="theta_t1")
-lines(x, theta1_true, col="blue", lwd=2)
-legend("topright", legend=expression(hat(theta)[t1], theta[t1]),
-		   col=c("red","blue"), lwd=2, bty="n")
+gc(full = TRUE) # Release unused memory
 
-# theta2_mean
-par(mfrow=c(1,1), mar=c(4,4,2,2), cex=0.8)
-plot(x, theta2_mean, type="l", col="red", lwd=2,
-	 xlab="t", ylab="", main="theta_t2")
-legend("topright", legend=expression(hat(theta)[t2]), col="red", lwd=2, bty="n")
-
-# Traceplots for theta_t1 ####
-t_obs <- c(50, 100, 150, 175)
-par(mfrow = c(2, 2))
-for (t in t_obs) {
-	plot(theta1_hist[, t], type="l", main=bquote(theta[.(t)*","*1]), xlab="", ylab="")
-	abline(v=burnin, col="red")
-}
-
-# Traceplot for theta_t2 ####
-par(mfrow = c(2, 2))
-for (t in t_obs) {
-	plot(theta2_hist[, t], type="l", main=bquote(theta[.(t)*","*1]), xlab="", ylab="")
-	abline(v=burnin, col="red")
-}
+print_and_plot_diagnostics(results, y, changepoints,
+                            theta1_true = theta1_true, theta2_true = NULL,
+                            t_obs = t_obs, burnin = burnin, elapsed_time = elapsed_time,
+                            plot_chain = plot_chain,
+                            nu_01 = nu_01, eta_01 = eta_01,
+                            nu_02 = nu_02, eta_02 = eta_02, plots = plots,
+                            compute_rhat = compute_rhat, compute_ess = compute_ess)
