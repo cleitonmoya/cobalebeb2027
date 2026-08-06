@@ -240,6 +240,8 @@ print_and_plot_diagnostics <- function(result_list, y, changepoints,
 
     # Plots (selected chain only, `result`/`plot_chain`)
     if (plots) {
+        
+        # Observations and theta1
         x <- 1:Tt
         par(mfrow = c(1, 1), mar = c(4, 4, 2, 2), cex = 0.8)
         plot(x, y, type = "l", xlab = "t", ylab = "", col = "gray",
@@ -255,7 +257,8 @@ print_and_plot_diagnostics <- function(result_list, y, changepoints,
                pch = if (theta1_present) c(20, NA, NA) else c(20, NA),
                bty = "n")
         
-        par(mfrow = c(1, 1), mar = c(4, 4, 2, 2), cex = 0.8)
+        # theta1, theta2 
+        par(mfrow = c(2, 1), mar = c(4, 4, 2, 2), cex = 0.8)
         ylim_range <- if (theta1_present) range(theta1_mean, theta1_true) else range(theta1_mean)
         plot(x, theta1_mean, type = "l", col = "red", lwd = 2, ylim = ylim_range,
              xlab = "t", ylab = "", main = sprintf("theta_t1 (chain %d)", plot_chain))
@@ -264,7 +267,6 @@ print_and_plot_diagnostics <- function(result_list, y, changepoints,
             legend("topright", legend = expression(hat(theta)[t1], theta[t1]), col = c("red", "blue"), lwd = 2, bty = "n")
         }
         
-        par(mfrow = c(1, 1), mar = c(4, 4, 2, 2), cex = 0.8)
         ylim_range <- if (theta2_present) range(theta2_mean, theta2_true) else range(theta2_mean)
         plot(x, theta2_mean, type = "l", col = "red", lwd = 2, ylim = ylim_range,
              xlab = "t", ylab = "", main = sprintf("theta_t2 (chain %d)", plot_chain))
@@ -272,6 +274,7 @@ print_and_plot_diagnostics <- function(result_list, y, changepoints,
             lines(x, theta2_true, col = "blue", lwd = 2)
             legend("topright", legend = expression(hat(theta)[t2], theta[t2]), col = c("red", "blue"), lwd = 2, bty = "n")
         }
+        
         
         par(mfrow = c(2, 2))
         for (t in t_obs) {
@@ -317,7 +320,7 @@ print_and_plot_diagnostics <- function(result_list, y, changepoints,
         
         
         if (compute_rhat) {
-            par(mfrow = c(2, 1), mar = c(4, 4, 2, 2), cex = 0.8)
+            par(mfrow = c(3, 1), mar = c(4, 4, 2, 2), cex = 0.8)
             plot(rhat_theta1, type = "l", main = expression("R-hat of " * theta[t1]), xlab = "t")
             abline(h = 1.01, col = "red", lty = 2)
             abline(v=changepoints, col="green")
@@ -325,10 +328,18 @@ print_and_plot_diagnostics <- function(result_list, y, changepoints,
             plot(rhat_theta2, type = "l", main = expression("R-hat of " * theta[t2]), xlab = "t")
             abline(h = 1.01, col = "red", lty = 2)
             abline(v=changepoints, col="green")
+            
+            ylim_range <- if (theta1_present) range(theta1_mean, theta1_true) else range(theta1_mean)
+            plot(x, theta1_mean, type = "l", col = "red", lwd = 2, ylim = ylim_range,
+                 xlab = "t", ylab = "", main = sprintf("theta_t1 (chain %d)", plot_chain))
+            if (theta1_present) {
+                lines(x, theta1_true, col = "blue", lwd = 2)
+                legend("topright", legend = expression(hat(theta)[t1], theta[t1]), col = c("red", "blue"), lwd = 2, bty = "n")
+            }
         }
         
         if (compute_ess) {
-            par(mfrow = c(2, 1), mar = c(4, 4, 2, 2), cex = 0.8)
+            par(mfrow = c(3, 1), mar = c(4, 4, 2, 2), cex = 0.8)
             plot(ess_theta1, type = "l", main = expression("Effective sample of " * theta[t1]), xlab = "t")
             abline(h = 400, col = "red", lty = 2)
             abline(v=changepoints, col="green")
@@ -336,6 +347,15 @@ print_and_plot_diagnostics <- function(result_list, y, changepoints,
             plot(ess_theta2, type = "l", main = expression("Effective sample of " * theta[t2]), xlab = "t")
             abline(h = 400, col = "red", lty = 2)
             abline(v=changepoints, col="green")
+            
+            ylim_range <- if (theta1_present) range(theta1_mean, theta1_true) else range(theta1_mean)
+            plot(x, theta1_mean, type = "l", col = "red", lwd = 2, ylim = ylim_range,
+                 xlab = "t", ylab = "", main = sprintf("theta_t1 (chain %d)", plot_chain))
+            if (theta1_present) {
+                lines(x, theta1_true, col = "blue", lwd = 2)
+                legend("topright", legend = expression(hat(theta)[t1], theta[t1]), col = c("red", "blue"), lwd = 2, bty = "n")
+            }
+            
         }
         
         if (!is.null(nu_02) && !is.null(eta_02)) {

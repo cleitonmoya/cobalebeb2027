@@ -10,10 +10,6 @@
 # make_chain_inits() below) and passes all of them to
 # print_and_plot_diagnostics(), which computes R_hat/ESS across chains and
 # plots only the chain selected via `plot_chain`.
-#
-# Chains run sequentially or in parallel depending on `parallel_chains`
-# (see "Parallel execution" below); the parallel path uses foreach +
-# doParallel + doRNG (same packages already used by simulation.R).
 
 rm(list = ls())
 options(error = function() traceback(2))
@@ -42,8 +38,8 @@ Tt_grid <- c(200, 400, 800, 1600)
 function_grid <- c("constant", "linear", "quadratic", "sinusoidal")
 
 # ---- Choose method and data data here ----
-method <- method_grid[4]
-f <- function_grid[3]
+method <- method_grid[1]
+f <- function_grid[1]
 Tt <- Tt_grid[4] 
 replica <- 1     # one of: 1,...,200
 # ------------------------------------------
@@ -59,44 +55,28 @@ changepoints <- c(0.25, 0.5, 0.75)*Tt
 method_idx <- match(method, method_grid)
 Tt_idx <- match(Tt, Tt_grid)
 f_idx <- match(f, function_grid)
+
 seed_base <- method_idx*1e5 + f_idx*1e4 + Tt_idx*1e3 + replica*10
+
 
 # ---- Parameters and initialization ----
 # General simulation parameters
 N_chains <- 3        # number of chains
 plot_chain <- 1      # which chain (1..N_chains) to plot / trace in detail
-N <- 11000          # number of iterations
-burnin <- 1000
+N <- 80000          # number of iterations
+burnin <- 5000
 verbose <- FALSE
 print_every <- 1000
 plots <- TRUE
 compute_rhat <- TRUE
 compute_ess <- TRUE
 
-# Parallel execution of the N_chains chains.
-#
-# parallel_chains = TRUE runs the chains concurrently via foreach %dorng%
-# (doParallel backend, doRNG for per-chain reproducible RNG streams --
-# same pattern used in simulation.R). FALSE keeps the original sequential
-# lapply(), useful when verbose = TRUE (interleaved worker output is hard
-# to read) or when debugging a single chain.
-#
-# n_cores = NULL (default) picks the number of PHYSICAL cores automatically
-# (see resolve_n_cores() below, which uses `lscpu` on Linux -- more
-# reliable than parallel::detectCores(logical = FALSE) on this hardware).
-# Hyperthreaded logical cores rarely help much for this kind of dense,
-# branch-heavy MCMC/SMC code, so physical-core count is a better default
-# than all logical cores. Set n_cores explicitly (e.g. n_cores = N_chains)
-# to override.
-parallel_chains <- TRUE
-n_cores <- NULL
-
 
 # Adaptive Metropolis hyperparameters (for amh_montoril)
 ac_ref <- 0.44             # acceptance ratio target
 
 # Particle Gibbs (pg_as) hyperparameter
-K <- 100  # Number of particles
+K <- 30  # Number of particles
 
 # SIR Laplace and SIR Collapsed  hyperparameters
 M_is <- 3             # Number of particles - IS for W1 integrated likelihood
@@ -221,86 +201,11 @@ run_one_chain <- function(init) {
     }
 }
 
-# ---- Physical core count (used when n_cores is not set explicitly) ----
-#
-# parallel::detectCores(logical = FALSE) is NOT reliable on this hardware:
-# on the user's i7-4510U (2 physical cores, hyperthreaded to 4 logical), it
-# returned 4 -- same as detectCores(logical = TRUE) -- silently counting
-# hyperthreads as physical cores instead of falling back or erroring.
-# `lscpu -p=CORE,SOCKET` reads the same /proc or /sys topology info but
-# parses it correctly here (verified against `lscpu`'s own "Thread(s) per
-# core" / "CPU(s)" summary), so it's used as the primary source on Linux;
-# detectCores(logical = FALSE), then floor(logical/2), are fallbacks only
-# for non-Linux systems or if lscpu isn't installed (e.g. some cluster
-# images).
-resolve_n_cores <- function(n_cores, N_chains) {
-    if (!is.null(n_cores)) return(n_cores)
-
-    phys <- NA_integer_
-    if (Sys.info()[["sysname"]] == "Linux" && nzchar(Sys.which("lscpu"))) {
-        out <- tryCatch(
-            system("lscpu -p=CORE,SOCKET 2>/dev/null | grep -v '^#'", intern = TRUE),
-            error = function(e) character(0)
-        )
-        if (length(out) > 0) phys <- length(unique(out)) # distinct (core,socket) pairs
-    }
-
-    if (is.na(phys)) phys <- parallel::detectCores(logical = FALSE)
-
-    if (is.na(phys)) {
-        logi <- parallel::detectCores(logical = TRUE)
-        phys <- max(1, logi %/% 2)
-        printf("Physical core count unavailable from OS; falling back to floor(logical/2) = %d", phys)
-    }
-    min(phys, N_chains) # no point requesting more workers than chains
-}
-
-# NOTE: elapsed_time below uses wall-clock time (Sys.time()), not
-# proc.time()'s user.self field. proc.time() only measures CPU time of the
-# CURRENT process; under parallel_chains = TRUE the chains run in worker
-# processes, so proc.time() on the main process would not capture their
-# work and would badly understate elapsed_time -- which feeds directly
-# into the ESS/second diagnostics in print_and_plot_diagnostics(). Wall
-# clock is correct in both the sequential and parallel cases.
-start_time <- Sys.time()
-
-if (parallel_chains) {
-    n_cores_used <- resolve_n_cores(n_cores, N_chains)
-    printf("Running %d chains in parallel on %d cores", N_chains, n_cores_used)
-
-    cl <- parallel::makeCluster(n_cores_used)
-    on.exit(parallel::stopCluster(cl), add = TRUE)
-    doParallel::registerDoParallel(cl)
-    `%dorng%` <- doRNG::`%dorng%`
-
-    # Each worker needs the compiled samplers and the globals run_one_chain()
-    # closes over (method, y, N, hyperparameters, etc.). .export handles the
-    # globals; load_all() (debug=FALSE, see note at top of file) puts
-    # amh_montoril_cpp/pg_as_cpp/sir_laplace_cpp/sir_collapsed_cpp in scope
-    # on each worker.
-    current_wd <- getwd()
-    parallel::clusterExport(cl, "current_wd")
-    parallel::clusterEvalQ(cl, {
-        setwd(current_wd)
-        pkgload::load_all("../PoissonLTDM", debug = FALSE)
-    })
-
-    # foreach auto-detects and exports the globals referenced inside the
-    # loop body (run_one_chain and everything it closes over: method, y, N,
-    # hyperparameters, printf, etc.) -- no need to list them manually.
-    results <- foreach::foreach(init = chain_inits) %dorng% {
-        run_one_chain(init)
-    }
-
-    #parallel::stopCluster(cl)
-} else {
-    results <- lapply(chain_inits, run_one_chain)
-}
-
-elapsed_time <- as.numeric(Sys.time() - start_time, units = "secs")
-printf("Total wall-clock time (%d chains, %s): %.2f s",
-       N_chains, if (parallel_chains) sprintf("parallel, %d cores", n_cores_used) else "sequential",
-       elapsed_time)
+start_time <- proc.time()
+results <- lapply(chain_inits, run_one_chain)
+tf <- proc.time()
+elapsed_time <- (tf - start_time)[[1]]
+printf("Total CPU time (%d chains): %.2f s", N_chains, elapsed_time)
 
 if (Tt == 200) t_obs <- c(50, 100, 150, 175)
 if (Tt == 400) t_obs <- c(75, 100, 200, 300)
