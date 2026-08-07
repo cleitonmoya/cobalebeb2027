@@ -9,16 +9,51 @@
 # two scripts made parametrizable over the calibration grid, plus disk
 # output (raw results + plots + a one-row summary) for later aggregation.
 #
-# THIS VERSION: local/manual use. Run it directly (Rscript calibration_phase.R
-# or source() it in an R session) to execute ONE row of the grid, selected
-# via task_id below -- exactly like test_cpp.R/test_stan.R let you pick one
-# (method, f, Tt) combination at the top of the file. Once this works and
-# is validated locally, task_id becomes the batchtools chunk/job index and
-# run_calibration_task() becomes the function passed to batchMap() -- no
-# other change needed.
+# Two independent choices, both set in the "Run control" block below:
+#
+# 1. run_mode: "local" or "cluster".
+#      "local"   -- runs ONE task (task_id below) in this R session, exactly
+#                   as before: same process, same console output, updates
+#                   results/calibration/summary.csv directly. For quick
+#                   testing/debugging of a single (method, f, Tt) combination.
+#      "cluster" -- submits every row of the (possibly subset) calibration
+#                   grid as ONE PBS job each, via batchtools, using
+#                   calibration_pbs.tmpl (ncpus=3, place=excl -- see that
+#                   file). Each job runs run_and_save_task() for its own
+#                   grid row, in its own R process, saving .rds + .pdf as
+#                   usual. submitJobs() returns immediately after
+#                   dispatching -- it does NOT wait for jobs to finish and
+#                   does NOT write summary.csv. Aggregation is a separate
+#                   step: run calibration_aggregate.R once the jobs are
+#                   done (see that file; check progress with
+#                   batchtools::getStatus(reg)).
+#
+# 2. grid_subset: NULL (run the full calibration_grid) or a subset filter
+#      applied to it (see "Grid subset" below) -- e.g. only the "stan" rows,
+#      to submit/run a smaller batch without editing the grid definition
+#      itself. Applies identically in both run_mode values: in "local" mode
+#      task_id indexes into the FILTERED grid; in "cluster" mode every row
+#      of the FILTERED grid becomes one job.
 
-rm(list = ls())
+# Capture CALIBRATION_PHASE_DEFS_ONLY (if the caller -- e.g.
+# calibration_aggregate.R -- set it before source()ing this file) BEFORE
+# rm(list = ls()) below wipes it out along with everything else in this
+# environment. See the "Guard against recursive dispatch" block further
+# down for how .defs_only_flag is used.
+.defs_only_flag <- exists("CALIBRATION_PHASE_DEFS_ONLY", inherits = FALSE) &&
+                    isTRUE(CALIBRATION_PHASE_DEFS_ONLY)
+
+rm(list = setdiff(ls(), ".defs_only_flag"))
 options(error = function() traceback(2))
+
+# NOTE (untested in a real batchtools/PBS job): this.path::this.path() is
+# designed for direct Rscript/source() invocation. Whether it still
+# resolves correctly when batchtools re-sources this file from inside
+# doJobCollection() (a different call stack) has not been verified here.
+# If a cluster-mode job's log shows a setwd()/this.path error, the fix is
+# to hardcode the known absolute path instead, e.g.:
+#   setwd("/mnt/nfs/home/cleiton/poisson_ltdm/simulation")
+# rather than relying on this.path() inside job execution.
 setwd(dirname(this.path::this.path()))
 
 # See test_cpp.R for why debug=FALSE matters here (elapsed_time feeds
@@ -29,6 +64,49 @@ source("../PoissonLTDM/R/sampler_stan.R")
 source("../tests/plot_diagnostics.R")
 
 printf <- function(...) cat(paste(sprintf(...), "\n"))
+
+# ---- archive_registry(): move a registry directory into registry_archive/
+# with a timestamp, preserving its logs and full job history -- used by
+# run_mode == "cluster"'s auto-clean step (see there for the full
+# rationale). Defined here, at top level (like printf above), rather than
+# inside the "cluster" dispatch branch, because loadRegistry() -- called
+# from within that auto-clean step -- re-sources this whole file via
+# loadRegistryDependencies(), which resets .GlobalEnv; anything defined
+# only inside the (now-guarded) dispatch block would NOT survive that
+# reset and be gone by the time archive_registry() is actually called
+# afterwards. This was caught during testing as an "object
+# 'archive_registry' not found"-style failure, the same root cause as the
+# "object 'registry_dir' not found" error fixed alongside it.
+registry_archive_dir <- "registry_archive"
+archive_registry <- function(reason, registry_dir) {
+    dir.create(registry_archive_dir, showWarnings = FALSE, recursive = TRUE)
+    archived_path <- file.path(registry_archive_dir,
+        paste0("registry_calibration_", format(Sys.time(), "%Y-%m-%d_%H%M%S")))
+    printf("%s -- archiving to: %s", reason, archived_path)
+    file.rename(registry_dir, archived_path)
+}
+
+# ==========================================================================
+# ---- Run control ----
+# ==========================================================================
+
+run_mode <- "cluster"   # "local" or "cluster"
+
+# Grid subset: NULL runs everything; otherwise a function(grid) -> grid
+# (row filter) applied to calibration_grid right after it is built below.
+# Example: only stan, only Tt=1600, only sir_collapsed + quadratic, etc.
+grid_subset <- NULL
+# grid_subset <- function(grid) subset(grid, method == "stan")
+
+# Only used when run_mode == "local": which row of the (filtered) grid to
+# run. A single integer runs just that row. "all" runs every row of the
+# (filtered) grid, one after another, in this same R session -- useful for
+# running a small grid_subset locally without going through batchtools/PBS
+# at all (e.g. a handful of cheap tasks), or for a first end-to-end smoke
+# test of the whole grid before committing to run_mode == "cluster".
+task_id <- 1
+
+# ==========================================================================
 
 # ---- Output paths ----
 path_results <- "results/calibration"
@@ -41,13 +119,10 @@ dir.create(path_plots,   showWarnings = FALSE, recursive = TRUE)
 #
 # Full calibration phase: 20 combinations (5 methods x 2 functions x 2 Tt),
 # replica fixed at 1. method_grid/Tt_grid/function_grid below are the FULL
-# reference grids (used for the deterministic seed formula) and are kept
-# complete regardless of which subset calibration_grid actually runs.
-#
-# LOCAL TEST SUBSET (current): 8 tasks (sir_laplace, sir_collapsed) x 2
-# functions x 2 Tt -- restricted here to validate the pipeline cheaply
-# before running the full 5-method grid. Restore method = method_grid to
-# run all 20.
+# reference grids (used for the deterministic seed formula) and stay
+# complete regardless of grid_subset -- the seed formula must be able to
+# place ANY (method, f, Tt) at its correct index, not just the ones in the
+# current subset.
 method_grid   <- c("amh_montoril", "pg_as", "sir_laplace", "sir_collapsed", "stan")
 Tt_grid       <- c(200, 400, 800, 1600)          # full reference grid (for seed encoding)
 function_grid <- c("constant", "linear", "quadratic", "sinusoidal") # full reference grid
@@ -61,8 +136,15 @@ calibration_grid <- expand.grid(
 
 replica <- 1  # fixed for the whole calibration phase
 
+# ---- Grid subset (see "Run control" above) ----
+if (!is.null(grid_subset)) {
+    calibration_grid <- grid_subset(calibration_grid)
+    rownames(calibration_grid) <- NULL
+}
+
 n_tasks <- nrow(calibration_grid)
-printf("Calibration grid: %d tasks", n_tasks)
+printf("Calibration grid: %d tasks%s", n_tasks,
+       if (!is.null(grid_subset)) " (subset applied)" else "")
 
 
 # ---- Per-method configuration, as decided during calibration ----
@@ -132,6 +214,115 @@ resolve_n_cores <- function(n_cores, N_chains) {
         printf("Physical core count unavailable from OS; falling back to floor(logical/2) = %d", phys)
     }
     min(phys, N_chains)
+}
+
+
+# ---- build_summary_row(): one-row summary from a diag object ----
+#
+# Every field comes directly from print_and_plot_diagnostics()'s return
+# value (diag) -- no recomputation. Per-chain vectors (length N_chains) are
+# flattened into one column per chain (e.g. ess_w1_chain1, ess_w1_chain2,
+# ess_w1_chain3) via flatten_chains(), so the whole summary stays a single
+# data.frame row, matching every line print_and_plot_diagnostics() prints
+# to the console for a task.
+#
+# Factored out of run_calibration_task() so calibration_aggregate.R can
+# call it too, on a diag recomputed from each task's saved .rds (via
+# print_and_plot_diagnostics(..., plots = FALSE)), without duplicating this
+# construction.
+flatten_chains <- function(x, name) {
+    if (is.null(x)) {
+        out <- list(NA_real_)
+        names(out) <- name
+        return(out)
+    }
+    out <- as.list(x)
+    names(out) <- paste0(name, "_chain", seq_along(x))
+    out
+}
+
+# nz(): NULL -> NA (scalar). data.frame() turns a NULL list element into a
+# 0-row column, not NA, which breaks row-binding whenever a field is NULL
+# for the current method (e.g. ac_ratio_mean is NULL for anything other
+# than amh_montoril). Every scalar diag$* field that can be NULL must be
+# wrapped in nz() before entering the data.frame() call below.
+nz <- function(x) if (is.null(x)) NA_real_ else x
+
+build_summary_row <- function(diag, method, f, Tt, replica, N, burnin, K, elapsed_time) {
+    data.frame(
+        c(
+            list(
+                method = method, f = f, Tt = Tt, replica = replica,
+                N = N, burnin = burnin, K = K,
+                elapsed_time_s = elapsed_time,
+
+                W1_mean = nz(diag$W1_mean), W1_median = nz(diag$W1_median),
+                W2_mean = nz(diag$W2_mean), W2_median = nz(diag$W2_median),
+                loglik = nz(diag$loglik),
+
+                rhat_theta01 = nz(diag$rhat_theta01),
+                rhat_theta02 = nz(diag$rhat_theta02),
+                rhat_w1 = nz(diag$rhat_w1),
+                rhat_w2 = nz(diag$rhat_w2),
+                rhat_theta1_mean = nz(diag$rhat_theta1_mean),
+                rhat_theta1_max  = nz(diag$rhat_theta1_max),
+                rhat_theta2_mean = nz(diag$rhat_theta2_mean),
+                rhat_theta2_max  = nz(diag$rhat_theta2_max),
+                rhat_max = nz(diag$rhat_max)
+            ),
+            flatten_chains(diag$ess_theta01, "ess_theta01"),
+            flatten_chains(diag$ess_theta01_tail, "ess_theta01_tail"),
+            list(ess_theta01_cv = nz(diag$ess_theta01_cv)),
+            flatten_chains(diag$ess_theta02, "ess_theta02"),
+            flatten_chains(diag$ess_theta02_tail, "ess_theta02_tail"),
+            list(ess_theta02_cv = nz(diag$ess_theta02_cv)),
+            flatten_chains(diag$ess_w1, "ess_w1"),
+            flatten_chains(diag$ess_w1_tail, "ess_w1_tail"),
+            list(ess_w1_cv = nz(diag$ess_w1_cv)),
+            flatten_chains(diag$ess_w2, "ess_w2"),
+            flatten_chains(diag$ess_w2_tail, "ess_w2_tail"),
+            list(ess_w2_cv = nz(diag$ess_w2_cv)),
+
+            flatten_chains(diag$ess_theta1_mean_over_t, "ess_theta1_mean_over_t"),
+            flatten_chains(diag$ess_theta1_mean_over_t_tail, "ess_theta1_mean_over_t_tail"),
+            list(ess_theta1_mean_over_t_cv = nz(diag$ess_theta1_mean_over_t_cv)),
+            flatten_chains(diag$ess_theta1_min_over_t, "ess_theta1_min_over_t"),
+            flatten_chains(diag$ess_theta1_min_over_t_tail, "ess_theta1_min_over_t_tail"),
+            list(ess_theta1_min_over_t_cv = nz(diag$ess_theta1_min_over_t_cv)),
+
+            flatten_chains(diag$ess_theta2_mean_over_t, "ess_theta2_mean_over_t"),
+            flatten_chains(diag$ess_theta2_mean_over_t_tail, "ess_theta2_mean_over_t_tail"),
+            list(ess_theta2_mean_over_t_cv = nz(diag$ess_theta2_mean_over_t_cv)),
+            flatten_chains(diag$ess_theta2_min_over_t, "ess_theta2_min_over_t"),
+            flatten_chains(diag$ess_theta2_min_over_t_tail, "ess_theta2_min_over_t_tail"),
+            list(ess_theta2_min_over_t_cv = nz(diag$ess_theta2_min_over_t_cv)),
+
+            list(
+                ess_bulk_min = nz(diag$ess_bulk_min),
+
+                ess_sec_w1_bulk = nz(diag$ess_sec_w1_bulk),
+                ess_sec_w1_tail = nz(diag$ess_sec_w1_tail),
+                ess_sec_w2_bulk = nz(diag$ess_sec_w2_bulk),
+                ess_sec_w2_tail = nz(diag$ess_sec_w2_tail),
+                ess_sec_theta1_mean_bulk = nz(diag$ess_sec_theta1_mean_bulk),
+                ess_sec_theta1_mean_tail = nz(diag$ess_sec_theta1_mean_tail),
+                ess_sec_theta1_min_bulk  = nz(diag$ess_sec_theta1_min_bulk),
+                ess_sec_theta1_min_tail  = nz(diag$ess_sec_theta1_min_tail),
+                ess_sec_theta2_mean_bulk = nz(diag$ess_sec_theta2_mean_bulk),
+                ess_sec_theta2_mean_tail = nz(diag$ess_sec_theta2_mean_tail),
+                ess_sec_theta2_min_bulk  = nz(diag$ess_sec_theta2_min_bulk),
+                ess_sec_theta2_min_tail  = nz(diag$ess_sec_theta2_min_tail),
+
+                ac_ratio_mean = nz(diag$ac_ratio_mean),
+                ac_ratio_at_changepoints = nz(diag$ac_ratio_at_changepoints),
+                w1_mh_acceptance_rate = nz(diag$w1_mh_acceptance_rate),
+                w2_mh_acceptance_rate = nz(diag$w2_mh_acceptance_rate),
+                ce1_shape = nz(diag$ce1_shape), ce1_rate = nz(diag$ce1_rate),
+                ce2_shape = nz(diag$ce2_shape), ce2_rate = nz(diag$ce2_rate)
+            )
+        ),
+        stringsAsFactors = FALSE
+    )
 }
 
 
@@ -229,10 +420,34 @@ run_calibration_task <- function(method, f, Tt, replica = 1) {
     burnin <- cfg$burnin
     K      <- if (!is.null(cfg$K)) cfg$K else NA_integer_
 
-    task_name <- sprintf("%s_%s_%s", method, f, Tt)
+    task_name    <- sprintf("%s_%s_%s", method, f, Tt)
+    task_rds     <- file.path(path_results, paste0(task_name, ".rds"))
+    plot_file    <- file.path(path_plots, paste0(task_name, ".pdf"))
     printf("==== Task: %s ====", task_name)
 
-    # ---- Load data ----
+    # ---- Checkpoint: skip entirely if this task's .rds already exists ----
+    #
+    # Same spirit as simulation.R's run_task(), but stronger: a task
+    # already run is skipped COMPLETELY -- no data reload, no diagnostics
+    # recomputation, no replotting -- not just "sampler skipped, everything
+    # else redone". Replotting in particular is not cheap (Tt-point
+    # traceplots/histograms), and is pure waste for a task whose .rds,
+    # .pdf, and summary.csv row are all already on disk from a previous
+    # run. Returns NULL; run_and_save_task() treats that as "nothing new
+    # to report" and does not touch summary.csv for this task -- filling
+    # summary.csv for already-checkpointed tasks is calibration_aggregate.R's
+    # job (it reads existing rows straight from a prior summary.csv/the
+    # .rds files, without recomputing anything either), not this script's.
+    #
+    # If N/burnin/K actually changed in method_config, this stale checkpoint
+    # would silently keep reporting the OLD run's diagnostics -- delete the
+    # .rds by hand to force a genuine re-run when that happens.
+    if (file.exists(task_rds)) {
+        printf("Task already run (%s exists) -- skipping entirely.", task_rds)
+        return(NULL)
+    }
+
+    # ---- Load data (needed for diagnostics either way) ----
     source_name <- sprintf("%s_%s_%s", f, Tt, replica)
     data <- readRDS(file.path("..", "data", "simulated", paste0(source_name, ".rds")))
     y <- data$y
@@ -336,7 +551,6 @@ run_calibration_task <- function(method, f, Tt, replica = 1) {
     # see plot_diagnostics.R). Wrapping the call in pdf()/dev.off() is the
     # standard R way to redirect that plotting to a file without touching
     # plot_diagnostics.R.
-    plot_file <- file.path(path_plots, paste0(task_name, ".pdf"))
     if (plots) {
         pdf(plot_file, width = 8, height = 6)
         on.exit(if (dev.cur() > 1) dev.off(), add = TRUE)
@@ -360,150 +574,297 @@ run_calibration_task <- function(method, f, Tt, replica = 1) {
     saveRDS(list(results = results, elapsed_time = elapsed_time,
                  method = method, f = f, Tt = Tt, replica = replica,
                  N = N, burnin = burnin, K = K, seed_base = seed_base),
-            file = file.path(path_results, paste0(task_name, ".rds")))
+            file = task_rds)
 
     # ---- One-row summary for later aggregation across all 20 tasks ----
-    #
-    # Every field comes directly from print_and_plot_diagnostics()'s return
-    # value (diag) -- no recomputation. Per-chain vectors (length N_chains)
-    # are flattened into one column per chain (e.g. ess_w1_chain1,
-    # ess_w1_chain2, ess_w1_chain3) via flatten_chains(), so the whole
-    # summary stays a single data.frame row, matching every line printed to
-    # the console for this task.
-    flatten_chains <- function(x, name) {
-        if (is.null(x)) {
-            out <- list(NA_real_)
-            names(out) <- name
-            return(out)
-        }
-        out <- as.list(x)
-        names(out) <- paste0(name, "_chain", seq_along(x))
-        out
-    }
-
-    # nz(): NULL -> NA (scalar). data.frame() turns a NULL list element into
-    # a 0-row column, not NA, which breaks row-binding whenever a field is
-    # NULL for the current method (e.g. ac_ratio_mean is NULL for anything
-    # other than amh_montoril). Every scalar diag$* field that can be NULL
-    # must be wrapped in nz() before entering the data.frame() call below.
-    nz <- function(x) if (is.null(x)) NA_real_ else x
-
-    summary_row <- data.frame(
-        c(
-            list(
-                method = method, f = f, Tt = Tt, replica = replica,
-                N = N, burnin = burnin, K = K,
-                elapsed_time_s = elapsed_time,
-
-                W1_mean = nz(diag$W1_mean), W1_median = nz(diag$W1_median),
-                W2_mean = nz(diag$W2_mean), W2_median = nz(diag$W2_median),
-                loglik = nz(diag$loglik),
-
-                rhat_theta01 = nz(diag$rhat_theta01),
-                rhat_theta02 = nz(diag$rhat_theta02),
-                rhat_w1 = nz(diag$rhat_w1),
-                rhat_w2 = nz(diag$rhat_w2),
-                rhat_theta1_mean = nz(diag$rhat_theta1_mean),
-                rhat_theta1_max  = nz(diag$rhat_theta1_max),
-                rhat_theta2_mean = nz(diag$rhat_theta2_mean),
-                rhat_theta2_max  = nz(diag$rhat_theta2_max),
-                rhat_max = nz(diag$rhat_max)
-            ),
-            flatten_chains(diag$ess_theta01, "ess_theta01"),
-            flatten_chains(diag$ess_theta01_tail, "ess_theta01_tail"),
-            list(ess_theta01_cv = nz(diag$ess_theta01_cv)),
-            flatten_chains(diag$ess_theta02, "ess_theta02"),
-            flatten_chains(diag$ess_theta02_tail, "ess_theta02_tail"),
-            list(ess_theta02_cv = nz(diag$ess_theta02_cv)),
-            flatten_chains(diag$ess_w1, "ess_w1"),
-            flatten_chains(diag$ess_w1_tail, "ess_w1_tail"),
-            list(ess_w1_cv = nz(diag$ess_w1_cv)),
-            flatten_chains(diag$ess_w2, "ess_w2"),
-            flatten_chains(diag$ess_w2_tail, "ess_w2_tail"),
-            list(ess_w2_cv = nz(diag$ess_w2_cv)),
-
-            flatten_chains(diag$ess_theta1_mean_over_t, "ess_theta1_mean_over_t"),
-            flatten_chains(diag$ess_theta1_mean_over_t_tail, "ess_theta1_mean_over_t_tail"),
-            list(ess_theta1_mean_over_t_cv = nz(diag$ess_theta1_mean_over_t_cv)),
-            flatten_chains(diag$ess_theta1_min_over_t, "ess_theta1_min_over_t"),
-            flatten_chains(diag$ess_theta1_min_over_t_tail, "ess_theta1_min_over_t_tail"),
-            list(ess_theta1_min_over_t_cv = nz(diag$ess_theta1_min_over_t_cv)),
-
-            flatten_chains(diag$ess_theta2_mean_over_t, "ess_theta2_mean_over_t"),
-            flatten_chains(diag$ess_theta2_mean_over_t_tail, "ess_theta2_mean_over_t_tail"),
-            list(ess_theta2_mean_over_t_cv = nz(diag$ess_theta2_mean_over_t_cv)),
-            flatten_chains(diag$ess_theta2_min_over_t, "ess_theta2_min_over_t"),
-            flatten_chains(diag$ess_theta2_min_over_t_tail, "ess_theta2_min_over_t_tail"),
-            list(ess_theta2_min_over_t_cv = nz(diag$ess_theta2_min_over_t_cv)),
-
-            list(
-                ess_bulk_min = nz(diag$ess_bulk_min),
-
-                ess_sec_w1_bulk = nz(diag$ess_sec_w1_bulk),
-                ess_sec_w1_tail = nz(diag$ess_sec_w1_tail),
-                ess_sec_w2_bulk = nz(diag$ess_sec_w2_bulk),
-                ess_sec_w2_tail = nz(diag$ess_sec_w2_tail),
-                ess_sec_theta1_mean_bulk = nz(diag$ess_sec_theta1_mean_bulk),
-                ess_sec_theta1_mean_tail = nz(diag$ess_sec_theta1_mean_tail),
-                ess_sec_theta1_min_bulk  = nz(diag$ess_sec_theta1_min_bulk),
-                ess_sec_theta1_min_tail  = nz(diag$ess_sec_theta1_min_tail),
-                ess_sec_theta2_mean_bulk = nz(diag$ess_sec_theta2_mean_bulk),
-                ess_sec_theta2_mean_tail = nz(diag$ess_sec_theta2_mean_tail),
-                ess_sec_theta2_min_bulk  = nz(diag$ess_sec_theta2_min_bulk),
-                ess_sec_theta2_min_tail  = nz(diag$ess_sec_theta2_min_tail),
-
-                ac_ratio_mean = nz(diag$ac_ratio_mean),
-                ac_ratio_at_changepoints = nz(diag$ac_ratio_at_changepoints),
-                w1_mh_acceptance_rate = nz(diag$w1_mh_acceptance_rate),
-                w2_mh_acceptance_rate = nz(diag$w2_mh_acceptance_rate),
-                ce1_shape = nz(diag$ce1_shape), ce1_rate = nz(diag$ce1_rate),
-                ce2_shape = nz(diag$ce2_shape), ce2_rate = nz(diag$ce2_rate)
-            )
-        ),
-        stringsAsFactors = FALSE
-    )
+    summary_row <- build_summary_row(diag, method, f, Tt, replica, N, burnin, K, elapsed_time)
 
     return(summary_row)
 }
 
 
-# =====================================================================
-# LOCAL TEST DRIVER -- run ONE task at a time, exactly like test_cpp.R /
-# test_stan.R let you pick one (method, f, Tt) at the top of the file.
-# Change task_id below and re-run to test a different combination.
-# =====================================================================
-
-# ---- Choose which row of the calibration grid to run here ----
-task_id <- 5
-# ----------------------------------------------------------------------
-
-task <- calibration_grid[task_id, ]
-printf("Selected task %d/%d: method=%s, f=%s, Tt=%d",
-       task_id, n_tasks, task$method, task$f, task$Tt)
-
-summary_row <- run_calibration_task(task$method, task$f, task$Tt, replica)
-
-printf("Summary row: rhat_max=%.4f, ess_bulk_min=%.1f, elapsed_time=%.2fs",
-       summary_row$rhat_max, summary_row$ess_bulk_min, summary_row$elapsed_time_s)
-
-# ---- Append/update the consolidated summary.csv ----
+# ---- run_and_save_task(): runs one grid row AND updates summary.csv ----
 #
-# Any pre-existing row for the same (method, f, Tt, replica) is dropped
-# before appending the new one, so re-running a task_id after a config
-# change (N, burnin, K, ...) updates that task's row instead of duplicating
-# it. Column set may grow over time (e.g. a method-specific field appearing
-# for the first time) -- rbind() with a mismatched column set errors out
-# rather than silently misaligning columns, which is intentional here.
-summary_file <- file.path(path_results, "summary.csv")
-if (file.exists(summary_file)) {
-    summary_all <- read.csv(summary_file, stringsAsFactors = FALSE)
-    keep <- !(summary_all$method == summary_row$method &
-              summary_all$f == summary_row$f &
-              summary_all$Tt == summary_row$Tt &
-              summary_all$replica == summary_row$replica)
-    summary_all <- rbind(summary_all[keep, , drop = FALSE], summary_row)
-} else {
-    summary_all <- summary_row
+# Wraps run_calibration_task() with the summary.csv read-modify-write
+# logic. Used directly by run_mode == "local" below. NOT used by
+# run_mode == "cluster": each PBS job there calls this too (it is what
+# batchMap() dispatches), but concurrent jobs writing to the same
+# summary.csv at once would race/clobber each other, so cluster-mode jobs
+# only produce their own .rds -- calibration_aggregate.R builds
+# summary.csv from those .rds files afterwards, once all jobs are done.
+#
+# Any pre-existing summary.csv row for the same (method, f, Tt, replica)
+# is dropped before appending the new one, so re-running a task after a
+# config change (N, burnin, K, ...) updates that task's row instead of
+# duplicating it. Column set may grow over time (e.g. a method-specific
+# field appearing for the first time) -- rbind() with a mismatched column
+# set errors out rather than silently misaligning columns, which is
+# intentional here.
+#
+# run_calibration_task() returns NULL for an already-checkpointed task
+# (see its own header comment) -- there is nothing new to summarize in
+# that case, so update_summary_csv is skipped and this function returns
+# NULL too. That task's summary.csv row (if any) is left exactly as it
+# was; calibration_aggregate.R is what fills in rows for checkpointed
+# tasks, not this function.
+run_and_save_task <- function(method, f, Tt, replica = 1, update_summary_csv = TRUE) {
+    summary_row <- run_calibration_task(method, f, Tt, replica)
+
+    if (is.null(summary_row)) return(invisible(NULL))
+
+    printf("Summary row: rhat_max=%.4f, ess_bulk_min=%.1f, elapsed_time=%.2fs",
+           summary_row$rhat_max, summary_row$ess_bulk_min, summary_row$elapsed_time_s)
+
+    if (update_summary_csv) {
+        summary_file <- file.path(path_results, "summary.csv")
+        if (file.exists(summary_file)) {
+            summary_all <- read.csv(summary_file, stringsAsFactors = FALSE)
+            keep <- !(summary_all$method == summary_row$method &
+                      summary_all$f == summary_row$f &
+                      summary_all$Tt == summary_row$Tt &
+                      summary_all$replica == summary_row$replica)
+            summary_all <- rbind(summary_all[keep, , drop = FALSE], summary_row)
+        } else {
+            summary_all <- summary_row
+        }
+        write.csv(summary_all, summary_file, row.names = FALSE)
+        printf("Summary written to: %s (%d task(s) total)", summary_file, nrow(summary_all))
+    }
+
+    summary_row
 }
-write.csv(summary_all, summary_file, row.names = FALSE)
-printf("Summary written to: %s (%d task(s) total)", summary_file, nrow(summary_all))
+
+
+# ==========================================================================
+# ---- Dispatch: run_mode == "local" or "cluster" (see "Run control") ----
+# ==========================================================================
+
+# ---- Guard against recursive dispatch inside a batchtools/PBS job, or
+# when this file is sourced only for its definitions (e.g. by
+# calibration_aggregate.R) ----
+#
+# makeRegistry(source = "calibration_phase.R") makes every job re-source
+# this WHOLE file (functions, config, AND the dispatch block below) before
+# batchtools calls the batchMap() target function with that job's
+# arguments. Without a guard, a job with run_mode == "cluster" would hit
+# this same dispatch block and call submitJobs() again from inside itself.
+# Sys.getenv("PBS_NODEFILE") is only non-empty when actually executing
+# inside a running PBS job (same auto-detection already used in
+# simulation.R) -- never true for the user's own interactive/Rscript
+# invocation of this file, so it reliably distinguishes "being re-sourced
+# inside a job" from "being run directly to submit/run a task".
+#
+# Separately, calibration_aggregate.R sources this file purely to reuse
+# its function/config definitions (build_summary_row(), path_results,
+# print_and_plot_diagnostics(), etc.) -- it must NOT trigger a real task
+# run or a batchtools submission either, even though it runs outside any
+# PBS job. It sets CALIBRATION_PHASE_DEFS_ONLY <- TRUE before sourcing this
+# file for exactly that purpose; captured above (before rm(list=ls())) as
+# .defs_only_flag, since that variable does not exist for a normal direct
+# run of this script.
+#
+# A third, distinct re-entrancy case: makeRegistry() itself calls
+# loadRegistryDependencies() -- which re-sources this file -- from INSIDE
+# its own construction, before returning (see the comment right before the
+# makeRegistry() call below). That happens in the very process that is
+# submitting jobs, not inside a PBS job and not via
+# calibration_aggregate.R, so neither of the two guards above catches it
+# on its own. CALIBRATION_PHASE_MAKING_REGISTRY is set (via Sys.setenv(),
+# so it survives sys.source()'s environment reset) immediately before that
+# makeRegistry() call, for exactly this case.
+running_inside_pbs_job <- Sys.getenv("PBS_NODEFILE") != ""
+making_registry <- Sys.getenv("CALIBRATION_PHASE_MAKING_REGISTRY") != ""
+
+if (!running_inside_pbs_job && !.defs_only_flag && !making_registry) {
+
+if (run_mode == "local") {
+
+    # ---- LOCAL: run task_id (a single row) or "all" rows of the (filtered) grid ----
+    if (identical(task_id, "all")) {
+        printf("Running all %d task(s) of the (filtered) grid, sequentially.", n_tasks)
+        for (i in seq_len(n_tasks)) {
+            task <- calibration_grid[i, ]
+            printf("[%d/%d] method=%s, f=%s, Tt=%d", i, n_tasks, task$method, task$f, task$Tt)
+            run_and_save_task(task$method, task$f, task$Tt, replica)
+        }
+    } else {
+        task <- calibration_grid[task_id, ]
+        printf("Selected task %d/%d: method=%s, f=%s, Tt=%d",
+               task_id, n_tasks, task$method, task$f, task$Tt)
+
+        summary_row <- run_and_save_task(task$method, task$f, task$Tt, replica)
+    }
+
+} else if (run_mode == "cluster") {
+
+    # ---- CLUSTER: submit every row of the (filtered) grid as one PBS job
+    # each, via batchtools. Returns as soon as jobs are dispatched --
+    # does NOT wait and does NOT write summary.csv (see
+    # calibration_aggregate.R for that, run separately once jobs finish).
+    library(batchtools)
+
+    # ---- Guard against recursive dispatch, set BEFORE any
+    # loadRegistry()/makeRegistry() call in this block ----
+    #
+    # Both loadRegistry() (used below to inspect a previous registry) and
+    # makeRegistry() (used later to create the new one) call
+    # loadRegistryDependencies() internally, which re-sources this whole
+    # file via sys.source(fn, envir = .GlobalEnv). Without this guard set
+    # BEFORE the very first such call, that re-source hits this same
+    # dispatch block, which calls loadRegistry() again, which re-sources
+    # again, ... -- infinite recursion (this was caught in testing: it
+    # required Ctrl+C to stop, with a stack of hundreds of nested
+    # loadRegistry() -> loadRegistryDependencies() -> sys.source() frames).
+    # Setting the flag here, before the auto-clean section's
+    # loadRegistry() call further down, closes that gap -- setting it only
+    # right before the final makeRegistry() call (as in an earlier version
+    # of this script) was NOT early enough.
+    #
+    # A Sys.setenv() var (not a plain R variable) is used because
+    # sys.source(fn, envir = .GlobalEnv) resets the R environment on every
+    # re-source but process-level env vars survive it -- same mechanism
+    # already relied on for PBS_NODEFILE. on.exit() ensures the flag is
+    # cleared even if this block errors out partway through (e.g. the
+    # "jobs still queued/running" stop() below) -- otherwise it would stay
+    # TRUE for the rest of the R session, silently suppressing this
+    # dispatch block on any later run_and_save_task()-adjacent call that
+    # happens to trigger a sys.source() of this file.
+    Sys.setenv(CALIBRATION_PHASE_MAKING_REGISTRY = "TRUE")
+    on.exit(Sys.unsetenv("CALIBRATION_PHASE_MAKING_REGISTRY"), add = TRUE)
+
+    registry_dir <- "registry_calibration"  # fixed, hardcoded value -- see below for why it must be re-set after loadRegistry()
+
+    # ---- Auto-clean a PREVIOUS, FINISHED registry ----
+    #
+    # makeRegistry() refuses to create a registry where one already exists
+    # (the "File at path already exists" error seen during earlier
+    # testing). Re-running this script after a previous cluster submission
+    # has fully finished (every job either done or errored -- none still
+    # queued/running) is the common case and should not require manually
+    # rm -rf-ing the directory every time.
+    #
+    # This is intentionally NOT automatic when jobs are still
+    # queued/running: archiving registry_calibration out from under jobs
+    # that are still executing on the PBS side would not kill them, but it
+    # would orphan them -- they keep running, but batchtools loses track
+    # of them (no more getStatus(), no results collected). In that case,
+    # stop with a clear message instead of silently touching anything, so
+    # the person can decide (wait for the jobs, or explicitly archive/remove
+    # the directory themselves if they really mean to abandon those jobs).
+    #
+    # A previous registry is ARCHIVED (moved into registry_archive/ with a
+    # timestamp, via archive_registry() defined at the top of this file --
+    # see there for why it must live there and not here), not deleted --
+    # this preserves its logs and full job history (results/calibration/*.rds
+    # and summary.csv are separate and were never affected either way)
+    # while still freeing up the registry_calibration path for a fresh
+    # makeRegistry() call.
+
+    if (dir.exists(registry_dir)) {
+        # NOTE: loadRegistry() below also re-sources this whole file (same
+        # loadRegistryDependencies() mechanism as makeRegistry() -- see the
+        # guard comment above), which resets .GlobalEnv via
+        # rm(list = setdiff(ls(), ".defs_only_flag")) at the top of this
+        # script. registry_dir (a plain R variable, set just above) does
+        # NOT survive that reset the way env vars do -- so it must be
+        # re-assigned immediately after any loadRegistry()/loadRegistryDependencies()
+        # call, before it is used again. This was the cause of an "object
+        # 'registry_dir' not found" error caught during testing.
+        old_reg <- tryCatch(loadRegistry(registry_dir, writeable = FALSE),
+                             error = function(e) NULL)
+        registry_dir <- "registry_calibration"  # re-assign: see NOTE above
+
+        if (is.null(old_reg)) {
+            # Directory exists but isn't a valid/readable registry (e.g.
+            # left over from an interrupted makeRegistry() call) -- safe
+            # to archive, there is nothing coherent to lose track of.
+            archive_registry(sprintf("Unreadable leftover registry directory: %s", registry_dir),
+                              registry_dir)
+        } else {
+            n_pending <- nrow(batchtools::findNotDone(reg = old_reg))
+            if (n_pending > 0) {
+                stop(sprintf(
+                    "Registry '%s' already exists with %d job(s) still queued/running. ",
+                    registry_dir, n_pending),
+                    "Refusing to archive it automatically -- wait for those jobs to finish ",
+                    "(batchtools::getStatus(batchtools::loadRegistry(\"", registry_dir, "\"))), ",
+                    "or archive/remove the directory yourself if you mean to abandon them.")
+            }
+            archive_registry(sprintf("Previous registry '%s' has no pending jobs", registry_dir),
+                              registry_dir)
+        }
+    }
+
+    reg <- makeRegistry(
+        file.dir = registry_dir,
+        source = "calibration_phase.R",  # each job re-sources this whole
+                                          # file (run_mode is irrelevant
+                                          # inside the job -- batchMap()'s
+                                          # target function is what runs,
+                                          # not the dispatch block below)
+        seed = 1
+    )
+
+    reg$cluster.functions <- makeClusterFunctionsTORQUE("calibration_pbs.tmpl")
+
+    # ---- Skip rows whose .rds is already checkpointed ----
+    #
+    # run_calibration_task() itself already skips a checkpointed task
+    # (see its header comment) -- but only after a PBS job has been
+    # queued/started for it, i.e. after paying for a full place=excl node
+    # allocation just to check one file and exit. Filtering here avoids
+    # creating those jobs in the first place. Uses the same task_name
+    # convention (method_f_Tt) as run_calibration_task()'s own task_rds path.
+    task_rds_exists <- file.exists(file.path(
+        path_results,
+        sprintf("%s_%s_%s.rds", calibration_grid$method, calibration_grid$f, calibration_grid$Tt)))
+    n_skipped <- sum(task_rds_exists)
+    if (n_skipped > 0) {
+        printf("Skipping %d already-checkpointed task(s) (no job submitted for them):", n_skipped)
+        skipped <- calibration_grid[task_rds_exists, ]
+        for (i in seq_len(nrow(skipped))) {
+            printf("  %s_%s_%s", skipped$method[i], skipped$f[i], skipped$Tt[i])
+        }
+    }
+    calibration_grid_to_submit <- calibration_grid[!task_rds_exists, ]
+
+    if (nrow(calibration_grid_to_submit) == 0) {
+        printf("Every task in the (filtered) grid is already checkpointed -- nothing to submit.")
+        printf("Run calibration_aggregate.R to build/update summary.csv from the existing .rds files.")
+    } else {
+
+    # update_summary_csv = FALSE: see run_and_save_task()'s header comment
+    # -- concurrent jobs must not race on the same summary.csv.
+    ids <- batchMap(
+        fun = function(method, f, Tt, replica) {
+            run_and_save_task(method, f, Tt, replica, update_summary_csv = FALSE)
+        },
+        method = calibration_grid_to_submit$method, f = calibration_grid_to_submit$f,
+        Tt = calibration_grid_to_submit$Tt,
+        more.args = list(replica = replica),
+        reg = reg
+    )
+
+    # walltime_hours = 3 covers every method/Tt combination with generous
+    # margin -- the most expensive case measured during calibration (stan,
+    # Tt=1600) took ~2.1h for 3 chains; amh_montoril/pg_as/sir_laplace/
+    # sir_collapsed are all well under an hour even at Tt=1600. Reduced
+    # from an initial 6h: schedulers typically use requested walltime for
+    # backfilling decisions, and a long requested walltime can make a job
+    # harder to slot in even when physical nodes are free -- observed only
+    # 2 jobs running concurrently out of 18 submitted despite place=excl
+    # nodes apparently being available, which requesting less walltime
+    # (while still safely covering the measured worst case) may help with.
+    submitJobs(ids, resources = list(ncpus = N_chains, walltime_hours = 3), reg = reg)
+
+    printf("Submitted %d job(s) to the cluster (registry: %s).", nrow(ids), reg$file.dir)
+    printf("Check progress with batchtools::getStatus(loadRegistry(\"registry_calibration\")).")
+    printf("Once all jobs are done, run calibration_aggregate.R to build summary.csv.")
+
+    }
+
+} else {
+    stop(sprintf("Unknown run_mode: '%s'. Use \"local\" or \"cluster\".", run_mode))
+}
+
+}  # end !running_inside_pbs_job && !.defs_only_flag && !making_registry guard

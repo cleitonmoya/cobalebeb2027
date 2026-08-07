@@ -1,0 +1,57 @@
+#!/bin/bash
+## PBS Pro template for batchtools -- Euler cluster (CeMEAI/ICMC/USP)
+##
+## Deliberately does NOT specify a queue (#PBS -q ...): per the Euler
+## documentation, submissions should be left unqueued so the default
+## router (RouteQ) picks the right execution queue based on the resources
+## requested below. This was verified directly on the cluster during
+## calibration-phase testing -- explicit -q Seq_short/Seq_shortX/
+## RouteQS/etc. either hit ACL restrictions (acl_groups=interno, this
+## account is in group "externo") or from_route_only rejections; omitting
+## -q entirely and letting RouteQ route by resources is what worked.
+##
+## place=excl reserves the WHOLE node exclusively for this job, even
+## though ncpus below is small (3, one per MCMC chain) -- verified via
+## pbsnodes -a while a place=excl/ncpus=2 test job was running: the node
+## showed state=job-exclusive with resources_assigned.ncpus matching only
+## the requested count, confirming no other job (from this user or
+## anyone else) can land on the same physical cores while this job runs.
+## This was adopted specifically because ncpus on Euler counts logical
+## (hyperthreaded) CPUs, not physical cores, on the Parallel_* queues, and
+## even on the nominally-physical-count Seq_*/Fat-node queues, a job's
+## cgroup cpuset was NOT restricted to distinct physical cores (taskset
+## affinity showed 0-31, i.e. the whole node) -- place=excl was the only
+## mechanism found that gives real physical-core isolation without
+## per-core taskset pinning logic.
+
+#PBS -N <%= job.name %>
+#PBS -j oe
+#PBS -o <%= log.file %>
+#PBS -l select=1:ncpus=<%= resources$ncpus %>
+#PBS -l place=excl
+#PBS -l walltime=<%= sprintf("%02d:00:00", if (is.null(resources$walltime_hours)) 6 else resources$walltime_hours) %>
+
+source ~/setup_env.sh
+cd ~/cobalebeb2027/simulation/
+
+## Record which node and hardware this job actually ran on -- goes into
+## the batchtools log (registry_calibration/logs/<job>.log) permanently,
+## since qstat -f/tracejob only retain this information for a limited
+## time after a job finishes. Useful for reporting the exact node/CPU
+## configuration used in the paper.
+echo "===================================================="
+echo "PBS job ID:    $PBS_JOBID"
+echo "Node (hostname): $(hostname)"
+echo "PBS_NODEFILE contents:"
+cat "$PBS_NODEFILE" 2>/dev/null
+echo "----"
+echo "CPU model:"
+grep -m1 "model name" /proc/cpuinfo
+echo "Physical cores on this node (raw '^core id' line count): $(grep -c '^core id' /proc/cpuinfo)"
+echo "Unique physical core ids:    $(grep '^core id' /proc/cpuinfo | sort -u | wc -l)"
+echo "Sockets (physical id):       $(grep '^physical id' /proc/cpuinfo | sort -u | wc -l)"
+echo "Logical CPUs (nproc):        $(nproc)"
+echo "===================================================="
+echo
+
+Rscript -e 'batchtools::doJobCollection("<%= uri %>")'
