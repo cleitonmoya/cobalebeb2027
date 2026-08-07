@@ -1,13 +1,16 @@
 # simulation/calibration_phase.R
 #
-# Official, reproducible run of the calibration-phase grid (5 methods x 2
-# functions x 2 Tt, replica = 1, N_chains = 3), documenting the N/burnin/K
-# configuration decided for each method during the pre-calibration
-# discussion. Reuses, unchanged, the same chain-initialization scheme,
-# hyperparameters, and diagnostic pipeline as tests/test_cpp.R and
-# tests/test_stan.R -- this script is not a reimplementation, it is those
-# two scripts made parametrizable over the calibration grid, plus disk
-# output (raw results + plots + a one-row summary) for later aggregation.
+# Official, reproducible run of the calibration-phase grid: a cross-join
+# of method_configs (one row per (method, N, burnin, K) configuration --
+# a method may appear more than once, to compare configurations) with
+# (f, Tt) (2 functions x 2 Tt), replica = 1, N_chains = 3. Documents the
+# N/burnin/K configuration(s) decided for each method during the
+# pre-calibration discussion. Reuses, unchanged, the same
+# chain-initialization scheme, hyperparameters, and diagnostic pipeline as
+# tests/test_cpp.R and tests/test_stan.R -- this script is not a
+# reimplementation, it is those two scripts made parametrizable over the
+# calibration grid, plus disk output (raw results + plots + a one-row
+# summary) for later aggregation.
 #
 # Two independent choices, both set in the "Run control" block below:
 #
@@ -15,7 +18,7 @@
 #      "local"   -- runs ONE task (task_id below) in this R session, exactly
 #                   as before: same process, same console output, updates
 #                   results/calibration/summary.csv directly. For quick
-#                   testing/debugging of a single (method, f, Tt) combination.
+#                   testing/debugging of a single grid row.
 #      "cluster" -- submits every row of the (possibly subset) calibration
 #                   grid as ONE PBS job each, via batchtools, using
 #                   calibration_pbs.tmpl (ncpus=3, place=excl -- see that
@@ -30,10 +33,11 @@
 #
 # 2. grid_subset: NULL (run the full calibration_grid) or a subset filter
 #      applied to it (see "Grid subset" below) -- e.g. only the "stan" rows,
-#      to submit/run a smaller batch without editing the grid definition
-#      itself. Applies identically in both run_mode values: in "local" mode
-#      task_id indexes into the FILTERED grid; in "cluster" mode every row
-#      of the FILTERED grid becomes one job.
+#      or only method=="amh_montoril" & N==110000, to submit/run a smaller
+#      batch without editing the grid definition itself. Applies
+#      identically in both run_mode values: in "local" mode task_id indexes
+#      into the FILTERED grid; in "cluster" mode every row of the FILTERED
+#      grid becomes one job.
 
 # Capture CALIBRATION_PHASE_DEFS_ONLY (if the caller -- e.g.
 # calibration_aggregate.R -- set it before source()ing this file) BEFORE
@@ -86,6 +90,23 @@ archive_registry <- function(reason, registry_dir) {
     file.rename(registry_dir, archived_path)
 }
 
+# ---- task_name_for(): canonical task/file-name for one (method, f, Tt, N,
+# burnin, K) combination ----
+#
+# <method>_<f>_<Tt>_N<N>_b<burnin>[_K<K>] -- same convention already
+# applied by hand to the pre-existing calibration .rds/.pdf files via
+# rename_calibration_results.sh (K suffix present only when not NA, e.g.
+# pg_as). Centralized here (used for task_rds, plot_file, and by
+# calibration_aggregate.R) so the naming rule is defined in exactly one
+# place. Defined at top level, like printf/archive_registry above, for the
+# same reason: it must survive a loadRegistry()/makeRegistry()-triggered
+# re-source of this file.
+task_name_for <- function(method, f, Tt, N, burnin, K) {
+    base <- sprintf("%s_%s_%s_N%s_b%s", method, f, Tt, N, burnin)
+    if (!is.na(K)) base <- paste0(base, "_K", K)
+    base
+}
+
 # ==========================================================================
 # ---- Run control ----
 # ==========================================================================
@@ -115,24 +136,54 @@ dir.create(path_results, showWarnings = FALSE, recursive = TRUE)
 dir.create(path_plots,   showWarnings = FALSE, recursive = TRUE)
 
 
+# ---- Per-method configuration(s), as decided during calibration ----
+#
+# A TABLE, not a single config per method: a method can appear more than
+# once, with different (N, burnin, K), when more than one configuration is
+# being compared for it -- e.g. amh_montoril here has three rows, to
+# document the R_hat plateau found when increasing N/burnin (55000/5000 ->
+# 75000/5000 -> 110000/10000) at Tt=1600, where R_hat(theta1_max) stayed
+# structurally elevated (Fisher information argument -- see calibration
+# discussion) rather than genuinely converging with more iterations.
+#
+# N / burnin / K fixed across the ENTIRE Tt grid for a given config row --
+# deliberately NOT re-tuned per Tt, so that ESS/time comparisons across Tt
+# stay apples-to-apples (amh_montoril and pg_as both show degradation at
+# Tt=1600 that is treated as a genuine finding, not "fixed" by inflating N
+# further within a single config row).
+method_configs <- rbind(
+    data.frame(method = "amh_montoril",  N = 55000,  burnin = 5000,  K = NA),
+    data.frame(method = "amh_montoril",  N = 75000,  burnin = 5000,  K = NA),
+    data.frame(method = "amh_montoril",  N = 110000, burnin = 10000, K = NA),
+    data.frame(method = "pg_as",         N = 11000,  burnin = 1000,  K = 100),
+    data.frame(method = "sir_laplace",   N = 11000,  burnin = 1000,  K = NA),
+    data.frame(method = "sir_collapsed", N = 11000,  burnin = 1000,  K = NA),
+    data.frame(method = "stan",          N = 11000,  burnin = 1000,  K = NA)
+)
+
+
 # ---- Calibration grid ----
 #
-# Full calibration phase: 20 combinations (5 methods x 2 functions x 2 Tt),
-# replica fixed at 1. method_grid/Tt_grid/function_grid below are the FULL
-# reference grids (used for the deterministic seed formula) and stay
-# complete regardless of grid_subset -- the seed formula must be able to
-# place ANY (method, f, Tt) at its correct index, not just the ones in the
-# current subset.
+# Full calibration phase: cross-join of method_configs (7 rows above) with
+# (f, Tt) (2 x 2 = 4 combinations), giving 28 tasks. method_grid/Tt_grid/
+# function_grid below are the FULL reference grids (used for the
+# deterministic seed formula) and stay complete regardless of grid_subset
+# -- the seed formula must be able to place ANY (method, f, Tt) at its
+# correct index, not just the ones in the current subset.
 method_grid   <- c("amh_montoril", "pg_as", "sir_laplace", "sir_collapsed", "stan")
 Tt_grid       <- c(200, 400, 800, 1600)          # full reference grid (for seed encoding)
 function_grid <- c("constant", "linear", "quadratic", "sinusoidal") # full reference grid
 
-calibration_grid <- expand.grid(
-    method = method_grid,
-    f      = c("constant", "quadratic"),
-    Tt     = c(200, 1600),
+f_Tt_grid <- expand.grid(
+    f  = c("constant", "quadratic"),
+    Tt = c(200, 1600),
     stringsAsFactors = FALSE
 )
+
+calibration_grid <- merge(method_configs, f_Tt_grid, by = NULL)
+calibration_grid <- calibration_grid[order(calibration_grid$method, calibration_grid$f,
+                                            calibration_grid$Tt, calibration_grid$N), ]
+rownames(calibration_grid) <- NULL
 
 replica <- 1  # fixed for the whole calibration phase
 
@@ -146,21 +197,6 @@ n_tasks <- nrow(calibration_grid)
 printf("Calibration grid: %d tasks%s", n_tasks,
        if (!is.null(grid_subset)) " (subset applied)" else "")
 
-
-# ---- Per-method configuration, as decided during calibration ----
-#
-# N / burnin (and, where applicable, K = number of SMC particles) fixed per
-# method across the ENTIRE Tt grid -- deliberately NOT re-tuned per Tt, so
-# that ESS/time comparisons across Tt stay apples-to-apples (see
-# discussion: amh_montoril and pg_as both showed degradation at Tt=1600
-# that is treated as a genuine finding, not "fixed" by inflating N further).
-method_config <- list(
-    amh_montoril  = list(N = 55000, burnin = 5000),
-    pg_as         = list(N = 11000, burnin = 1000, K = 100),
-    sir_laplace   = list(N = 11000, burnin = 1000),
-    sir_collapsed = list(N = 11000, burnin = 1000),
-    stan          = list(N = 11000, burnin = 1000)
-)
 
 N_chains   <- 3
 plot_chain <- 1
@@ -412,15 +448,14 @@ run_one_chain_cpp <- function(init, method, y, N, K) {
 # step -- everything above it is shared setup, everything it does is
 # self-contained (load data, run N_chains chains, compute diagnostics,
 # save raw + plots + summary, return the summary row).
-run_calibration_task <- function(method, f, Tt, replica = 1) {
+#
+# N/burnin/K are now explicit arguments (one row of calibration_grid),
+# not looked up from a per-method table -- a method can be run with more
+# than one (N, burnin, K) configuration (see method_configs above), so the
+# caller must say which one this particular task is.
+run_calibration_task <- function(method, f, Tt, N, burnin, K, replica = 1) {
 
-    cfg <- method_config[[method]]
-    if (is.null(cfg)) stop(sprintf("No configuration registered for method '%s'.", method))
-    N      <- cfg$N
-    burnin <- cfg$burnin
-    K      <- if (!is.null(cfg$K)) cfg$K else NA_integer_
-
-    task_name    <- sprintf("%s_%s_%s", method, f, Tt)
+    task_name    <- task_name_for(method, f, Tt, N, burnin, K)
     task_rds     <- file.path(path_results, paste0(task_name, ".rds"))
     plot_file    <- file.path(path_plots, paste0(task_name, ".pdf"))
     printf("==== Task: %s ====", task_name)
@@ -607,8 +642,8 @@ run_calibration_task <- function(method, f, Tt, replica = 1) {
 # NULL too. That task's summary.csv row (if any) is left exactly as it
 # was; calibration_aggregate.R is what fills in rows for checkpointed
 # tasks, not this function.
-run_and_save_task <- function(method, f, Tt, replica = 1, update_summary_csv = TRUE) {
-    summary_row <- run_calibration_task(method, f, Tt, replica)
+run_and_save_task <- function(method, f, Tt, N, burnin, K, replica = 1, update_summary_csv = TRUE) {
+    summary_row <- run_calibration_task(method, f, Tt, N, burnin, K, replica)
 
     if (is.null(summary_row)) return(invisible(NULL))
 
@@ -619,10 +654,14 @@ run_and_save_task <- function(method, f, Tt, replica = 1, update_summary_csv = T
         summary_file <- file.path(path_results, "summary.csv")
         if (file.exists(summary_file)) {
             summary_all <- read.csv(summary_file, stringsAsFactors = FALSE)
-            keep <- !(summary_all$method == summary_row$method &
-                      summary_all$f == summary_row$f &
-                      summary_all$Tt == summary_row$Tt &
-                      summary_all$replica == summary_row$replica)
+            # K may be NA (most methods) -- compare via a string key instead
+            # of == directly, since NA == NA is NA in R, not TRUE, which
+            # would silently fail to match/drop the old row for methods
+            # without a K.
+            existing_key <- with(summary_all, paste(method, f, Tt, N, burnin, K, replica))
+            this_key <- paste(summary_row$method, summary_row$f, summary_row$Tt,
+                               summary_row$N, summary_row$burnin, summary_row$K, summary_row$replica)
+            keep <- existing_key != this_key
             summary_all <- rbind(summary_all[keep, , drop = FALSE], summary_row)
         } else {
             summary_all <- summary_row
@@ -684,15 +723,18 @@ if (run_mode == "local") {
         printf("Running all %d task(s) of the (filtered) grid, sequentially.", n_tasks)
         for (i in seq_len(n_tasks)) {
             task <- calibration_grid[i, ]
-            printf("[%d/%d] method=%s, f=%s, Tt=%d", i, n_tasks, task$method, task$f, task$Tt)
-            run_and_save_task(task$method, task$f, task$Tt, replica)
+            printf("[%d/%d] method=%s, f=%s, Tt=%d, N=%d, burnin=%d, K=%s",
+                   i, n_tasks, task$method, task$f, task$Tt, task$N, task$burnin,
+                   if (is.na(task$K)) "NA" else task$K)
+            run_and_save_task(task$method, task$f, task$Tt, task$N, task$burnin, task$K, replica)
         }
     } else {
         task <- calibration_grid[task_id, ]
-        printf("Selected task %d/%d: method=%s, f=%s, Tt=%d",
-               task_id, n_tasks, task$method, task$f, task$Tt)
+        printf("Selected task %d/%d: method=%s, f=%s, Tt=%d, N=%d, burnin=%d, K=%s",
+               task_id, n_tasks, task$method, task$f, task$Tt, task$N, task$burnin,
+               if (is.na(task$K)) "NA" else task$K)
 
-        summary_row <- run_and_save_task(task$method, task$f, task$Tt, replica)
+        summary_row <- run_and_save_task(task$method, task$f, task$Tt, task$N, task$burnin, task$K, replica)
     }
 
 } else if (run_mode == "cluster") {
@@ -813,18 +855,15 @@ if (run_mode == "local") {
     # (see its header comment) -- but only after a PBS job has been
     # queued/started for it, i.e. after paying for a full place=excl node
     # allocation just to check one file and exit. Filtering here avoids
-    # creating those jobs in the first place. Uses the same task_name
-    # convention (method_f_Tt) as run_calibration_task()'s own task_rds path.
-    task_rds_exists <- file.exists(file.path(
-        path_results,
-        sprintf("%s_%s_%s.rds", calibration_grid$method, calibration_grid$f, calibration_grid$Tt)))
+    # creating those jobs in the first place. Uses task_name_for(), the
+    # same naming convention run_calibration_task() uses for its own
+    # task_rds path.
+    task_names <- with(calibration_grid, mapply(task_name_for, method, f, Tt, N, burnin, K))
+    task_rds_exists <- file.exists(file.path(path_results, paste0(task_names, ".rds")))
     n_skipped <- sum(task_rds_exists)
     if (n_skipped > 0) {
         printf("Skipping %d already-checkpointed task(s) (no job submitted for them):", n_skipped)
-        skipped <- calibration_grid[task_rds_exists, ]
-        for (i in seq_len(nrow(skipped))) {
-            printf("  %s_%s_%s", skipped$method[i], skipped$f[i], skipped$Tt[i])
-        }
+        for (name in task_names[task_rds_exists]) printf("  %s", name)
     }
     calibration_grid_to_submit <- calibration_grid[!task_rds_exists, ]
 
@@ -834,13 +873,18 @@ if (run_mode == "local") {
     } else {
 
     # update_summary_csv = FALSE: see run_and_save_task()'s header comment
-    # -- concurrent jobs must not race on the same summary.csv.
+    # -- concurrent jobs must not race on the same summary.csv. N/burnin/K
+    # are mapped per-row (like method/f/Tt), not passed via more.args,
+    # since they can now differ between rows of the same method (see
+    # method_configs above) -- only replica is genuinely constant across
+    # the whole grid.
     ids <- batchMap(
-        fun = function(method, f, Tt, replica) {
-            run_and_save_task(method, f, Tt, replica, update_summary_csv = FALSE)
+        fun = function(method, f, Tt, N, burnin, K, replica) {
+            run_and_save_task(method, f, Tt, N, burnin, K, replica, update_summary_csv = FALSE)
         },
         method = calibration_grid_to_submit$method, f = calibration_grid_to_submit$f,
-        Tt = calibration_grid_to_submit$Tt,
+        Tt = calibration_grid_to_submit$Tt, N = calibration_grid_to_submit$N,
+        burnin = calibration_grid_to_submit$burnin, K = calibration_grid_to_submit$K,
         more.args = list(replica = replica),
         reg = reg
     )

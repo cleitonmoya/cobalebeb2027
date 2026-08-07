@@ -14,13 +14,16 @@
 #
 # INCREMENTAL: reads any existing summary.csv first and keeps its rows for
 # tasks that are still present there -- those are NOT recomputed. Only
-# .rds files with no matching (method, f, Tt, replica) row in the existing
-# summary.csv are processed. This matters because diagnostics
-# recomputation, while much cheaper than re-running a sampler, is not free
-# (it re-does the R_hat/ESS pass over every chain's full history) --
-# there's no reason to redo it for tasks whose row is already known good.
-# Delete summary.csv (or the specific row) by hand to force a task to be
-# reprocessed.
+# .rds files with no matching (method, f, Tt, N, burnin, K, replica) row
+# in the existing summary.csv are processed -- this includes N/burnin/K
+# because the same (method, f, Tt) can now have more than one
+# configuration (see method_configs in calibration_phase.R), and those
+# must not be deduplicated against each other. This matters because
+# diagnostics recomputation, while much cheaper than re-running a sampler,
+# is not free (it re-does the R_hat/ESS pass over every chain's full
+# history) -- there's no reason to redo it for tasks whose row is already
+# known good. Delete summary.csv (or the specific row) by hand to force a
+# task to be reprocessed.
 #
 # Does NOT re-run any sampler: each .rds already contains the full
 # per-chain results (theta1_hist, theta2_hist, theta_01_hist, theta_02_hist,
@@ -62,13 +65,20 @@ if (file.exists(summary_file)) {
     summary_existing <- NULL
 }
 
-# task_key(): (method, f, Tt, replica) collapsed into one string per row,
-# used to match a .rds file's task against summary_existing's rows without
-# a 4-column merge.
-task_key <- function(method, f, Tt, replica) sprintf("%s|%s|%s|%s", method, f, Tt, replica)
+# task_key(): (method, f, Tt, N, burnin, K, replica) collapsed into one
+# string per row, used to match a .rds file's task against
+# summary_existing's rows. Includes N/burnin/K (not just method/f/Tt/
+# replica) so that multiple configurations of the same (method, f, Tt) --
+# e.g. amh_montoril run with three different (N, burnin) pairs -- are
+# treated as distinct tasks, not deduplicated against each other. K may be
+# NA for most methods; paste() renders it as the string "NA" consistently,
+# so equality comparison on the resulting key still works correctly.
+task_key <- function(method, f, Tt, N, burnin, K, replica) {
+    paste(method, f, Tt, N, burnin, K, replica)
+}
 
 existing_keys <- if (is.null(summary_existing)) character(0) else {
-    with(summary_existing, task_key(method, f, Tt, replica))
+    with(summary_existing, task_key(method, f, Tt, N, burnin, K, replica))
 }
 
 new_rows <- list()
@@ -87,8 +97,11 @@ for (i in seq_along(rds_files)) {
     f       <- task$f
     Tt      <- task$Tt
     replica <- task$replica
+    N       <- task$N
+    burnin  <- task$burnin
+    K       <- task$K
 
-    key <- task_key(method, f, Tt, replica)
+    key <- task_key(method, f, Tt, N, burnin, K, replica)
     if (key %in% existing_keys) {
         printf("[%d/%d] %s -- already in summary.csv, skipping.", i, length(rds_files), basename(rds_file))
         next
@@ -99,9 +112,6 @@ for (i in seq_along(rds_files)) {
     # Fields saved by run_calibration_task(): results, elapsed_time,
     # method, f, Tt, replica, N, burnin, K, seed_base.
     results      <- task$results
-    N            <- task$N
-    burnin       <- task$burnin
-    K            <- task$K
     elapsed_time <- task$elapsed_time
 
     # Reload the data for this task, needed by print_and_plot_diagnostics()
