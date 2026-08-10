@@ -2,13 +2,21 @@
 #PBS -N <%= job.name %>
 #PBS -l select=1:ncpus=<%= resources$ncpus %>
 #PBS -l place=excl
-#PBS -l walltime=<%= sprintf("%02d:00:00", resources$walltime_hours) %>
+#PBS -l walltime=<%= { total_min <- round(resources$walltime_hours * 60); sprintf("%02d:%02d:00", total_min %/% 60, total_min %% 60) } %>
 #PBS -j oe
 #PBS -o /dev/null
 
 # No -q directive: let RouteQ decide (Seq_short/Seq_long cap ncpus at 1,
-# so ncpus=20 can only be routed to Parallel_*) -- confirmed empirically
-# during planning (queue = Parallel_shortX for every job so far).
+# so ncpus=20 can only be routed to Parallel_*). Every job was landing in
+# Parallel_shortX during earlier testing -- confirmed by Euler support via
+# email to be a walltime effect, not something about ncpus/place=excl:
+# walltime <= 6h routes to "fila paralela curta" (only 2 nodes allocated
+# there at the time of that reply, max ~4 concurrent place=excl jobs);
+# walltime > 6h routes to "fila paralela longa" instead (14 free nodes at
+# the time of that reply, 160-ncpus quota becomes the real limit -- 8
+# concurrent place=excl jobs, the concurrency this file's CHUNK_SIZE-based
+# chunking is built around). This is why walltime_hours_for() in
+# simulation.R always returns a value above 6h now, for every category.
 
 # Redirect all output directly, from inside the script, to the same NFS
 # path batchtools expects the log at -- instead of relying on PBS's own

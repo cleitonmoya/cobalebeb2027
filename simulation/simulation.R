@@ -214,13 +214,31 @@ if (verbose && !.grid_already_printed) {
 }
 assign(".grid_already_printed", TRUE, envir = .GlobalEnv)
 
-# ---- Walltime per category (generous margin over the worst measured
-# per-task time within that category; see planning discussion) ----
+# ---- Walltime per category ----
+#
+# CRITICAL, confirmed by Euler support via email: walltime <= 6h routes to
+# "fila paralela curta", which had only 2 nodes allocated at the time of
+# that reply (max ~4 concurrent place=excl jobs, and in practice as few as
+# 2 were observed, likely because the other node was already occupied by
+# someone else). walltime > 6h routes to "fila paralela longa" instead (14
+# free nodes at the time of that reply), where this Category-2 account's
+# 160-ncpus quota is the actual binding constraint -- 160/20 = 8 concurrent
+# place=excl jobs, which is the concurrency the whole CHUNK_SIZE-based
+# chunking design here is built around. Every value below is deliberately
+# > 6h for this reason -- NOT because any single chunk is expected to take
+# that long (each is still a generous margin over the worst measured
+# per-task time within that category; see planning discussion), but
+# because requesting walltime <= 6h, even for the fastest chunks, would
+# silently confine ALL of them to the short queue's ~2-4-node ceiling
+# regardless of how quickly they actually finish. There is no downside to
+# requesting more walltime than a job needs (it releases its node as soon
+# as it's done either way) -- the downside only runs the other direction,
+# requesting too little.
 walltime_hours_for <- function(category) {
 	switch(category,
-		leve   = 1,
-		medio  = 1,
-		pesado = 3,
+		leve   = 6.5,
+		medio  = 7,
+		pesado = 8,
 		stop(sprintf("Unknown category: %s", category))
 	)
 }

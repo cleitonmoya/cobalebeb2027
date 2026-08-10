@@ -1,6 +1,18 @@
 #!/bin/bash
 ## PBS Pro template for batchtools -- Euler cluster (CeMEAI/ICMC/USP)
 ##
+## walltime > 6h is REQUIRED for meaningful concurrency, confirmed by
+## Euler support via email: walltime <= 6h routes to "fila paralela
+## curta" (only 2 nodes allocated there at the time of that reply, so
+## max ~4 concurrent place=excl jobs, sometimes as few as 2 in practice);
+## walltime > 6h routes to "fila paralela longa" instead (14 free nodes
+## at the time of that reply), where this account's 160-ncpus quota
+## becomes the real limit -- 160/20 = 8 concurrent place=excl jobs. This
+## is why calibration_phase.R's walltime_hours_for() always returns a
+## value above 6h now, even for the fastest chunk category -- requesting
+## a "correctly sized" short walltime for a fast job would silently
+## confine it to the short queue's much lower concurrency ceiling.
+##
 ## Deliberately does NOT specify a queue (#PBS -q ...): per the Euler
 ## documentation, submissions should be left unqueued so the default
 ## router (RouteQ) picks the right execution queue based on the resources

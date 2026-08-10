@@ -117,22 +117,40 @@ task_name_for <- function(method, f, Tt, N, burnin, K) {
 # ---- walltime_hours_for(): per-category walltime bucket, same three-tier
 # design as simulation.R's walltime_hours_for() ----
 #
-# Values are generous margins over the worst measured/estimated time
-# within each category at Tt=1600 (the worst case in the grid): "leve"
-# covers amh_montoril's N<=110000 configs and the sir_*/pg_as-K<=50
-# configs (well under a minute even at Tt=1600, calibration's N_chains=3
-# run in parallel so wall time tracks a single chain's time, not 3x it);
-# "medio" covers amh_montoril's N=220000 config and pg_as's K=100/200 or
-# N=22000 configs (estimated single-digit minutes, extrapolating linearly
-# from the K=100/N=11000 production timings); "pesado" is stan alone
-# (~2.1h measured at Tt=1600). Same as calibration_phase.R's method_configs
+# CRITICAL, confirmed by Euler support via email: walltime <= 6h routes to
+# "fila paralela curta", which had only 2 nodes allocated at the time of
+# that reply (max ~4 concurrent place=excl jobs, and in practice as few as
+# 2 were observed, likely because the other node was already occupied by
+# someone else). walltime > 6h routes to "fila paralela longa" instead (14
+# free nodes at the time of that reply), where this Category-2 account's
+# 160-ncpus quota is the actual binding constraint -- 160/20 = 8 concurrent
+# place=excl jobs, which is the concurrency the whole chunking/CHUNK_SIZE_
+# CALIB design here is built around. Every value below is deliberately
+# > 6h for this reason -- NOT because any single chunk is expected to take
+# that long (see the per-category cost breakdown further below, largely
+# unchanged from before this was discovered), but because requesting
+# walltime <= 6h, even for the fastest chunks, would silently confine ALL
+# of them to the short queue's ~2-4-node ceiling regardless of how quickly
+# they actually finish. There is no downside to requesting more walltime
+# than a job needs (it releases its node as soon as it's done either way)
+# -- the downside only runs the other direction, requesting too little.
+#
+# Per-category cost model (unchanged from before, just re-based above the
+# 6h threshold instead of tightly around actual cost): "leve" covers
+# amh_montoril's N<=110000 configs and the sir_*/pg_as-K<=50 configs (well
+# under a minute even at Tt=1600, calibration's N_chains=3 run in parallel
+# so wall time tracks a single chain's time, not 3x it); "medio" covers
+# amh_montoril's N=220000 config and pg_as's K=100/200 or N=22000 configs
+# (estimated single-digit minutes, extrapolating linearly from the
+# K=100/N=11000 production timings); "pesado" is stan alone (~2.1h
+# measured at Tt=1600). Same as calibration_phase.R's method_configs
 # category comment: re-bucket a row by hand if a probe run shows it
 # landing in the wrong tier before submitting the full grid.
 walltime_hours_for <- function(category) {
     switch(category,
-        leve   = 0.5,
-        medio  = 1,
-        pesado = 2.5,
+        leve   = 6.5,
+        medio  = 7,
+        pesado = 8,
         stop(sprintf("Unknown category: %s", category))
     )
 }
@@ -277,9 +295,78 @@ n_tasks <- nrow(calibration_grid)
 printf("Calibration grid: %d tasks%s", n_tasks,
        if (!is.null(grid_subset)) " (subset applied)" else "")
 
+# task_id: stable row identifier, used below to map flattened chain-units
+# back to the task they belong to (calibration_grid's own row order is not
+# safe to rely on for this once grid_subset has possibly reordered/dropped
+# rows).
+calibration_grid$task_id <- seq_len(n_tasks)
+
+# replica: same value for the whole grid ("fixed for the whole calibration
+# phase", per `replica <- 1` above) -- carried here as an explicit column
+# (not read from the global `replica` inside cluster workers) so
+# chain_grid/units below are fully self-contained data, not dependent on a
+# clusterExport()'d snapshot staying in sync with it.
+calibration_grid$replica <- replica
+
 
 N_chains   <- 3
 plot_chain <- 1
+
+# ---- Chunking (cluster mode): flatten calibration_grid into ONE ROW PER
+# (task, chain_id), then group into chunks of up to CHUNK_SIZE_CALIB
+# chain-units each, for the flattened/local-cluster dispatch below (see
+# run_chain_units()'s header comment for why chain-level, not task-level,
+# is the unit that actually fixes node under-utilization). ----
+#
+# CHUNK_SIZE_CALIB=18 (not 20): leaves 2 of the node's 20 physical cores
+# free for OS/NFS/scheduler overhead on a place=excl allocation, rather
+# than saturating every core -- the same margin already used informally
+# elsewhere in the project. TASKS_PER_CHUNK = 18 %/% 3 = 6 tasks/chunk when
+# N_chains=3, matching the "6 tasks, 18 cores" figure directly -- but
+# expressed as a chain-count division so it stays correct if N_chains ever
+# changes without anyone needing to re-derive this by hand.
+#
+# Chunks are assigned WITHIN (category, Tt) groups, same reasoning as
+# simulation.R's chunking: cost varies enormously across category (leve/
+# medio/pesado) and across Tt within a method (e.g. stan's cost ratio
+# between Tt=200 and Tt=1600), so mixing them in one chunk would leave that
+# chunk's workers idle waiting for its slowest chain-unit once the fast
+# ones finish -- exactly the sync-barrier problem the flattening is meant
+# to avoid, just moved up one level (across tasks in a chunk) instead of
+# solved. A task's own N_chains chain-units are NEVER split across chunks
+# (chunk_index is computed on TASKS within a (category, Tt) group, not on
+# raw chain-units), so aggregate_task() can always assume every chain file
+# it needs was produced by the same chunk's job.
+CHUNK_SIZE_CALIB <- 18L
+TASKS_PER_CHUNK  <- CHUNK_SIZE_CALIB %/% N_chains
+
+calibration_grid$chunk_index <- ave(seq_len(n_tasks),
+                                     paste(calibration_grid$category, calibration_grid$Tt),
+                                     FUN = function(idx) ceiling(seq_along(idx) / TASKS_PER_CHUNK))
+calibration_grid$chunk_id <- sprintf("%s_Tt%04d_%03d",
+                                      calibration_grid$category, calibration_grid$Tt,
+                                      calibration_grid$chunk_index)
+
+# ---- chain_grid: one row per (task, chain_id) -- the actual flat unit of
+# parallel work dispatched by run_chain_units() below. ----
+chain_grid <- do.call(rbind, lapply(1:N_chains, function(k) {
+    g <- calibration_grid
+    g$chain_id <- k
+    g
+}))
+chain_grid <- chain_grid[order(chain_grid$chunk_id, chain_grid$task_id, chain_grid$chain_id), ]
+rownames(chain_grid) <- NULL
+
+# ---- Job-level grid (one row per chunk/PBS job) ----
+job_grid <- unique(calibration_grid[, c("chunk_id", "category", "Tt")])
+job_grid <- job_grid[order(job_grid$category, job_grid$Tt, job_grid$chunk_id), ]
+rownames(job_grid) <- NULL
+n_chunks <- nrow(job_grid)
+printf("Calibration grid: %d chunk(s) (%d task(s)/chunk max, %d chain-unit(s)/chunk max)",
+       n_chunks, TASKS_PER_CHUNK, CHUNK_SIZE_CALIB)
+for (cat in unique(job_grid$category)) {
+    printf("  %s: %d chunk(s)", cat, sum(job_grid$category == cat))
+}
 
 # Prior hyperparameters (identical across all methods and the whole grid)
 mu_01     <- 0
@@ -308,9 +395,14 @@ compute_rhat <- TRUE
 compute_ess  <- TRUE
 
 
-# ---- Physical core count (identical logic to test_cpp.R / test_stan.R) ----
-resolve_n_cores <- function(n_cores, N_chains) {
-    if (!is.null(n_cores)) return(n_cores)
+# ---- Physical core count (same logic as simulation.R's resolve_n_cores(),
+# now genuinely needed here too: run_chain_units() calls this with an
+# explicit n_cores=CHUNK_SIZE_CALIB from cluster mode, unlike the old code
+# which only ever called it with n_cores=NULL -- capping by n_needed even
+# when n_cores is explicit avoids opening more workers than there are
+# chain-units to process for an incomplete trailing chunk.) ----
+resolve_n_cores <- function(n_cores, n_needed) {
+    if (!is.null(n_cores)) return(min(n_cores, n_needed))
 
     phys <- NA_integer_
     if (Sys.info()[["sysname"]] == "Linux" && nzchar(Sys.which("lscpu"))) {
@@ -326,7 +418,7 @@ resolve_n_cores <- function(n_cores, N_chains) {
         phys <- max(1, logi %/% 2)
         printf("Physical core count unavailable from OS; falling back to floor(logical/2) = %d", phys)
     }
-    min(phys, N_chains)
+    min(phys, n_needed)
 }
 
 
@@ -467,12 +559,51 @@ make_chain_inits <- function(chain_id, seed, y, Tt, method) {
 }
 
 
-# ---- One-chain runner for the Rcpp samplers (mirrors test_cpp.R exactly) ----
-run_one_chain_cpp <- function(init, method, y, N, K) {
-    printf("Chain %d/%d (seed=%d)", init$chain_id, N_chains, init$seed)
+# ---- One-chain runner: unified across ALL 5 methods, including stan ----
+#
+# Previously stan was a special case inside run_calibration_task() (its own
+# N_chains-way rstan::sampling(cores=) call, run OUTSIDE the
+# parallel::makeCluster() block used by the other 4 methods) -- this made
+# stan the one method that could not be decomposed into independent,
+# individually-checkpointable (task, chain_id) units, which is exactly what
+# the flattened chunking below needs from every method uniformly. Calling
+# sample_stan() with N_chains=1, n_cores=1 (one call per chain, like
+# simulation.R already does for production) removes that asymmetry: stan's
+# per-chain cost is now paid inside a single-core worker exactly like
+# amh_montoril/pg_as/sir_laplace/sir_collapsed, and its 3 calibration
+# chains are combined afterwards by aggregate_task() exactly the same way
+# regardless of method. The stan model object is loaded/compiled by the
+# CALLER (run_one_chain_unit(), once per worker process) and passed in here
+# -- loading/compiling it fresh inside every chain call would be wasteful
+# and (worse) would race on ../cache/poisson_ltdm.rds if two stan chain
+# units happened to run concurrently on the same node with no cache file
+# yet.
+run_one_chain <- function(init, method, y, N, burnin, K, stan_model = NULL) {
+    printf("Chain %d (seed=%d), method=%s", init$chain_id, init$seed, method)
     set.seed(init$seed)
 
-    if (method == "pg_as") {
+    if (method == "stan") {
+        # burnin passed through UNCHANGED to sample_stan(), which maps it
+        # straight to rstan::sampling(warmup = burnin) -- this is REAL HMC
+        # warmup (step-size + mass-matrix adaptation), not a value stan
+        # discards afterwards. sampler_stan.R calls rstan::extract(...,
+        # inc_warmup = TRUE), so the returned theta1_hist/theta2_hist/etc.
+        # already include those burnin draws, in N total rows -- exactly
+        # the same shape the 4 Rcpp samplers return (N total draws, no
+        # internal burnin trim of their own). aggregate_task()'s call to
+        # print_and_plot_diagnostics(..., burnin = burnin) is what trims
+        # the first `burnin` rows for every method uniformly, stan
+        # included -- burnin must NOT be zeroed here, or rstan performs no
+        # adaptation at all for the chain.
+        sample_stan(
+            model = stan_model, y = y, N = N, burnin = burnin, seed = init$seed,
+            N_chains = 1, n_cores = 1,
+            chain_inits = list(init),
+            mu_01 = mu_01, sigma2_01 = sigma2_01, mu_02 = mu_02, sigma2_02 = sigma2_02,
+            nu_01 = nu_01, eta_01 = eta_01, nu_02 = nu_02, eta_02 = eta_02,
+            verbose = verbose)$results[[1]]
+
+    } else if (method == "pg_as") {
         pg_as_cpp(y = y, K = K, N = N,
                   mu_01 = mu_01, sigma2_01 = sigma2_01, mu_02 = mu_02, sigma2_02 = sigma2_02,
                   nu_01 = nu_01, eta_01 = eta_01, nu_02 = nu_02, eta_02 = eta_02,
@@ -504,52 +635,116 @@ run_one_chain_cpp <- function(init, method, y, N, K) {
                            M_is_lik = M_is, M_sir_theta1 = M_sir, M_irls_max = M_irls_max, tol = tol,
                            verbose = verbose, print_every = print_every)
     } else {
-        stop(sprintf("Unknown Rcpp method: '%s'.", method))
+        stop(sprintf("Unknown method: '%s'.", method))
     }
 }
 
 
-# ---- Main entry point: runs ONE row of calibration_grid ----
+# ---- Chain-level seed: shared by run_one_chain_unit() and any code that
+# needs to know a chain's seed without actually running it (e.g. tests) ----
 #
-# This is the function that becomes the batchMap() target in the next
-# step -- everything above it is shared setup, everything it does is
-# self-contained (load data, run N_chains chains, compute diagnostics,
-# save raw + plots + summary, return the summary row).
+# Same formula run_calibration_task() used before, now factored out since
+# both run_one_chain_unit() (runs a chain) and aggregate_task() (loads a
+# task's already-run chains back from disk, no need to recompute the seed,
+# but needs seed_base for the final task .rds's seed_base field) need it.
+task_seed_base <- function(method, f, Tt, config_idx, replica) {
+    method_idx <- match(method, method_grid)
+    Tt_idx     <- match(Tt, Tt_grid)
+    f_idx      <- match(f, function_grid)
+    method_idx * 1e7 + f_idx * 1e6 + Tt_idx * 1e5 + config_idx * 1e3 + replica * 10
+}
+
+
+# ---- chain_result_filename(): path for one (task, chain_id) checkpoint ----
 #
-# N/burnin/K are now explicit arguments (one row of calibration_grid),
-# not looked up from a per-method table -- a method can be run with more
-# than one (N, burnin, K) configuration (see method_configs above), so the
-# caller must say which one this particular task is.
-run_calibration_task <- function(method, f, Tt, N, burnin, K, config_idx, replica = 1) {
+# Lives under path_chains (results/calibration/chains_tmp/), separate from
+# path_results (the final per-TASK .rds, unchanged) -- these are two
+# different kinds of checkpoint at two different granularities (chain vs.
+# task), and aggregate_task() deletes most of the chain-level ones once the
+# task-level one exists (see there), so keeping them in their own
+# subdirectory makes that cleanup a simple glob instead of having to
+# pattern-match filenames apart from the task-level .rds files living in
+# the same directory.
+path_chains <- file.path(path_results, "chains_tmp")
+dir.create(path_chains, showWarnings = FALSE, recursive = TRUE)
 
-    task_name    <- task_name_for(method, f, Tt, N, burnin, K)
-    task_rds     <- file.path(path_results, paste0(task_name, ".rds"))
-    plot_file    <- file.path(path_plots, paste0(task_name, ".pdf"))
-    printf("==== Task: %s ====", task_name)
+chain_result_filename <- function(method, f, Tt, N, burnin, K, chain_id) {
+    task_name <- task_name_for(method, f, Tt, N, burnin, K)
+    file.path(path_chains, sprintf("%s_chain%d.rds", task_name, chain_id))
+}
 
-    # ---- Checkpoint: skip entirely if this task's .rds already exists ----
-    #
-    # Same spirit as simulation.R's run_task(), but stronger: a task
-    # already run is skipped COMPLETELY -- no data reload, no diagnostics
-    # recomputation, no replotting -- not just "sampler skipped, everything
-    # else redone". Replotting in particular is not cheap (Tt-point
-    # traceplots/histograms), and is pure waste for a task whose .rds,
-    # .pdf, and summary.csv row are all already on disk from a previous
-    # run. Returns NULL; run_and_save_task() treats that as "nothing new
-    # to report" and does not touch summary.csv for this task -- filling
-    # summary.csv for already-checkpointed tasks is calibration_aggregate.R's
-    # job (it reads existing rows straight from a prior summary.csv/the
-    # .rds files, without recomputing anything either), not this script's.
-    #
-    # If N/burnin/K actually changed in method_config, this stale checkpoint
-    # would silently keep reporting the OLD run's diagnostics -- delete the
-    # .rds by hand to force a genuine re-run when that happens.
+
+# ---- run_one_chain_unit(): the flat, individually-checkpointed unit of
+# parallel work -- one (task, chain_id) pair ----
+#
+# This is what gets distributed across the ~18 workers of a chunk's local
+# cluster (see run_chain_units() below) -- NOT run_calibration_task() /
+# whole tasks, which is what made the OLD design block a full node (20
+# cores) down to only N_chains=3 busy workers. Checkpointed exactly like
+# run_calibration_task() used to be at the task level, just one level
+# finer-grained: if this chain's .rds already exists, load and return it
+# instead of re-running -- lets a chunk resume after a job dies partway
+# through without redoing chains that already finished, and lets
+# aggregate_task() (below) simply assume every chain file it needs is
+# already on disk once run_chain_units() returns.
+#
+# stan_model is NULL for every method except stan; it is loaded/compiled
+# ONCE per worker process by run_chain_units()'s clusterEvalQ() (or, in
+# "local" single-task mode, once by run_calibration_task() itself), not
+# once per chain -- see run_one_chain()'s header comment for why.
+run_one_chain_unit <- function(method, f, Tt, N, burnin, K, config_idx, replica, chain_id, stan_model = NULL) {
+    out_file <- chain_result_filename(method, f, Tt, N, burnin, K, chain_id)
+
+    if (file.exists(out_file)) {
+        return(readRDS(out_file))
+    }
+
+    source_name <- sprintf("%s_%s_%s", f, Tt, replica)
+    data <- readRDS(file.path("..", "data", "simulated", paste0(source_name, ".rds")))
+    y <- data$y
+
+    seed_base <- task_seed_base(method, f, Tt, config_idx, replica)
+    seed <- seed_base + (chain_id - 1)
+
+    init <- make_chain_inits(chain_id, seed, y, Tt, method)
+
+    start_time <- Sys.time()
+    hist <- run_one_chain(init, method, y, N, burnin, K, stan_model = stan_model)
+    elapsed_time <- as.numeric(Sys.time() - start_time, units = "secs")
+
+    chain_result <- list(chain_id = chain_id, seed = seed, elapsed_time = elapsed_time, hist = hist)
+    saveRDS(chain_result, file = out_file)
+    chain_result
+}
+
+
+# ---- aggregate_task(): combines a task's N_chains already-run chain
+# checkpoints into the final task-level .rds + diagnostic .pdf + summary
+# row -- unchanged output contract from the old run_calibration_task(),
+# just fed from chain_result_filename() checkpoints instead of an in-memory
+# `results` list built by a single N_chains-way parallel block ----
+#
+# Callable only once every one of this task's N_chains chain files exists
+# on disk (run_chain_units()/run_one_chain_unit() above are what create
+# them) -- callers are responsible for that ordering (both
+# run_calibration_task() below and the "cluster" dispatch's per-chunk
+# aggregation loop guarantee it).
+aggregate_task <- function(method, f, Tt, N, burnin, K, config_idx, replica = 1) {
+
+    task_name <- task_name_for(method, f, Tt, N, burnin, K)
+    task_rds  <- file.path(path_results, paste0(task_name, ".rds"))
+    plot_file <- file.path(path_plots, paste0(task_name, ".pdf"))
+    printf("==== Aggregating task: %s ====", task_name)
+
+    # Same checkpoint spirit as before: a task already aggregated is
+    # skipped entirely -- see run_calibration_task()'s old header comment
+    # (unchanged rationale, just moved here since aggregation, not chain
+    # execution, is now the step that produces the task-level artifacts).
     if (file.exists(task_rds)) {
-        printf("Task already run (%s exists) -- skipping entirely.", task_rds)
+        printf("Task already aggregated (%s exists) -- skipping entirely.", task_rds)
         return(NULL)
     }
 
-    # ---- Load data (needed for diagnostics either way) ----
     source_name <- sprintf("%s_%s_%s", f, Tt, replica)
     data <- readRDS(file.path("..", "data", "simulated", paste0(source_name, ".rds")))
     y <- data$y
@@ -561,105 +756,37 @@ run_calibration_task <- function(method, f, Tt, N, burnin, K, config_idx, replic
     if (Tt == 800)  t_obs <- c(100, 300, 500, 700)
     if (Tt == 1600) t_obs <- c(400, 800, 1200, 1600)
 
-    # ---- Seed (extends the project's deterministic formula with
-    # config_idx, so that different (N, burnin, K) rows of the same method
-    # at the same (f, Tt) -- e.g. amh_montoril's N=55000 vs N=220000 configs
-    # -- get distinct, reproducible seeds instead of colliding on the same
-    # seed_base and silently sharing the same RNG stream. The 1e4 slot is
-    # left empty (Tt_idx*1e5, config_idx*1e3) as headroom for a method ever
-    # growing past 9 config rows without needing to touch this formula
-    # again.) ----
-    method_idx <- match(method, method_grid)
-    Tt_idx     <- match(Tt, Tt_grid)
-    f_idx      <- match(f, function_grid)
-    seed_base  <- method_idx * 1e7 + f_idx * 1e6 + Tt_idx * 1e5 + config_idx * 1e3 + replica * 10
+    seed_base <- task_seed_base(method, f, Tt, config_idx, replica)
 
-    printf("Running %s for %s, seed_base=%d, N=%d, burnin=%d%s, config_idx=%d",
-           method, source_name, seed_base, N, burnin,
-           if (!is.na(K)) sprintf(", K=%d", K) else "", config_idx)
-
-    # ---- Chain initializations ----
-    chain_inits <- lapply(1:N_chains, function(k) {
-        make_chain_inits(k, seed_base + (k - 1), y, Tt, method)
-    })
-
-    # ---- Run ----
-    start_time <- Sys.time()
-
-    if (method == "stan") {
-        options(mc.cores = resolve_n_cores(NULL, N_chains))
-        rstan::rstan_options(auto_write = FALSE)
-
-        if (file.exists("../cache/poisson_ltdm.rds")) {
-            model <- readRDS("../cache/poisson_ltdm.rds")
-        } else {
-            printf("Building the Stan model")
-            model <- rstan::stan_model(
-                file = "../PoissonLTDM/inst/stan/poisson_ltdm.stan",
-                model_name = "PoissonLTDM")
-            saveRDS(model, file = "../cache/poisson_ltdm.rds")
-        }
-
-        stan_out <- sample_stan(
-            model = model, y = y, N = N, burnin = burnin, seed = seed_base,
-            N_chains = N_chains, n_cores = resolve_n_cores(NULL, N_chains),
-            chain_inits = chain_inits,
-            mu_01 = mu_01, sigma2_01 = sigma2_01, mu_02 = mu_02, sigma2_02 = sigma2_02,
-            nu_01 = nu_01, eta_01 = eta_01, nu_02 = nu_02, eta_02 = eta_02,
-            verbose = verbose)
-        results <- stan_out$results
-
-    } else {
-        n_cores_used <- resolve_n_cores(NULL, N_chains)
-        printf("Running %d chains in parallel on %d cores", N_chains, n_cores_used)
-
-        cl <- parallel::makeCluster(n_cores_used)
-        on.exit(parallel::stopCluster(cl), add = TRUE)
-        doParallel::registerDoParallel(cl)
-        `%dorng%` <- doRNG::`%dorng%`
-
-        current_wd <- getwd()
-        parallel::clusterExport(cl, "current_wd", envir = environment())
-
-        # run_one_chain_cpp() and the hyperparameter/config globals it uses
-        # (mu_01, sigma2_01, ..., ac_ref, M_irls_max, M_is, tol, R_prerun,
-        # M_sir, verbose, print_every) are defined at the script's top level
-        # (.GlobalEnv), not inside run_calibration_task() -- foreach's
-        # automatic variable detection only walks the LEXICAL environment of
-        # the %dorng% call (i.e. run_calibration_task()'s own environment),
-        # so it does not find them. They must be exported explicitly, from
-        # .GlobalEnv, for the worker processes to see them.
-        parallel::clusterExport(cl,
-            c("run_one_chain_cpp", "printf",
-              "mu_01", "sigma2_01", "mu_02", "sigma2_02",
-              "nu_01", "eta_01", "nu_02", "eta_02",
-              "ac_ref", "M_is", "M_irls_max", "tol", "R_prerun", "M_sir",
-              "verbose", "print_every", "N_chains"),
-            envir = .GlobalEnv)
-
-        parallel::clusterEvalQ(cl, {
-            setwd(current_wd)
-            pkgload::load_all("../PoissonLTDM", debug = FALSE)
-        })
-
-        results <- foreach::foreach(init = chain_inits) %dorng% {
-            run_one_chain_cpp(init, method, y, N, K)
-        }
+    chain_files <- vapply(1:N_chains, function(k) chain_result_filename(method, f, Tt, N, burnin, K, k),
+                           character(1))
+    missing <- !file.exists(chain_files)
+    if (any(missing)) {
+        stop(sprintf(
+            "aggregate_task(%s): %d/%d chain checkpoint(s) missing -- run_chain_units() ",
+            task_name, sum(missing), N_chains),
+            "must complete every chain of a task before aggregate_task() is called for it.")
     }
+    chain_results <- lapply(chain_files, readRDS)
 
-    elapsed_time <- as.numeric(Sys.time() - start_time, units = "secs")
-    printf("Total wall-clock time (%d chains): %.2f s", N_chains, elapsed_time)
+    # `results`: same shape print_and_plot_diagnostics()/build_summary_row()
+    # already expect -- a plain list of N_chains history objects, in chain
+    # order, exactly what the old N_chains-way parallel block produced
+    # in-memory.
+    results <- lapply(chain_results, `[[`, "hist")
 
-    gc(full = TRUE)
+    # elapsed_time: previously the WALL-CLOCK time of the whole N_chains-way
+    # parallel block (chains genuinely running side by side, so this was
+    # close to max(per-chain time), not their sum). Chains are now flat
+    # units that may run at different points in time, possibly across
+    # different chunk jobs on a resumed run -- max() over their individually
+    # measured elapsed_time is the closest equivalent available and is what
+    # ESS/second (a downstream diagnostic) is computed against, same as
+    # before. NOT sum(): summing would understate ESS/second by conflating
+    # "3 chains ran on 3 different cores" with "3 chains ran back-to-back on
+    # 1 core", which is not what happened in either the old or new design.
+    elapsed_time <- max(vapply(chain_results, `[[`, numeric(1), "elapsed_time"))
 
-    # ---- Diagnostics: print (console) + plot (redirected to a PDF file) ----
-    #
-    # print_and_plot_diagnostics() prints to the console, plots directly to
-    # the active graphics device, and returns the R_hat/ESS values it
-    # computed (rhat_max, ess_bulk_min, and the per-parameter breakdowns --
-    # see plot_diagnostics.R). Wrapping the call in pdf()/dev.off() is the
-    # standard R way to redirect that plotting to a file without touching
-    # plot_diagnostics.R.
     if (plots) {
         pdf(plot_file, width = 8, height = 6)
         on.exit(if (dev.cur() > 1) dev.off(), add = TRUE)
@@ -679,46 +806,156 @@ run_calibration_task <- function(method, f, Tt, N, burnin, K, config_idx, replic
         printf("Plots saved to: %s", plot_file)
     }
 
-    # ---- Save raw results ----
     saveRDS(list(results = results, elapsed_time = elapsed_time,
                  method = method, f = f, Tt = Tt, replica = replica,
                  N = N, burnin = burnin, K = K, seed_base = seed_base),
             file = task_rds)
 
-    # ---- One-row summary for later aggregation across all 20 tasks ----
-    summary_row <- build_summary_row(diag, method, f, Tt, replica, N, burnin, K, elapsed_time)
+    # ---- Clean up per-chain checkpoints, keeping only plot_chain's ----
+    #
+    # Every chain's raw history is already inside task_rds (results list
+    # above) -- the per-chain files under path_chains/ were only ever a
+    # resumability checkpoint for the flattened parallel step, not a
+    # separate source of truth. Deleting all but plot_chain's avoids
+    # doubling NFS usage for the heaviest configs (e.g. amh_montoril's
+    # N=220000/Tt=1600 row: ~5.6GB per chain history -- keeping all 3
+    # intermediate files alongside the already-heavy task_rds would nearly
+    # double peak disk use for that row for no benefit). plot_chain's file
+    # is kept deliberately: it is the one already re-read for the
+    # diagnostic plot above, so keeping it lets that specific chain's raw
+    # history be inspected/re-plotted later without reloading task_rds's
+    # (larger, all-chains) results list.
+    for (k in seq_len(N_chains)) {
+        if (k != plot_chain) {
+            f_chain <- chain_result_filename(method, f, Tt, N, burnin, K, k)
+            if (file.exists(f_chain)) file.remove(f_chain)
+        }
+    }
 
-    return(summary_row)
+    build_summary_row(diag, method, f, Tt, replica, N, burnin, K, elapsed_time)
+}
+
+
+# ---- run_chain_units(): runs a whole data.frame of (task, chain_id) rows
+# in ONE flat, maximally-parallel local cluster ----
+#
+# This is the piece that actually delivers the "6 tasks per job, 18/20
+# cores busy instead of 3/20" goal: instead of one parallel::makeCluster()
+# PER TASK (N_chains=3 workers, opened and torn down once per task -- the
+# old design, and the reason a whole place=excl node sat at 3/20 cores
+# busy), ONE cluster is opened for the WHOLE chunk (up to CHUNK_SIZE_CALIB
+# chain-units, e.g. 6 tasks x 3 chains = 18), and every chain-unit --
+# regardless of which task it belongs to -- is pulled from one shared
+# foreach queue. A worker that finishes task A's chain 2 early does not
+# wait for task A's chains 1/3 to finish; it immediately picks up the next
+# pending chain-unit in the queue, whatever task it belongs to. This is
+# what actually removes the per-task synchronization barrier that a naive
+# "pack 6 fixed tasks per job" (task-level, not chain-level, packing) would
+# still have if those 6 tasks differ in cost -- mirrors simulation.R's
+# run_tasks(), just with "one chain of one task" as the flat unit instead
+# of "one whole task" (which is already atomic there, since production
+# tasks are single-chain).
+#
+# stan_model is loaded/compiled ONCE here (not per chain, not per task) and
+# exported to every worker via clusterExport() -- workers that never handle
+# a stan chain-unit simply never touch it. is_stan: TRUE only if `units`
+# contains at least one stan row, so the (potentially slow, first-time)
+# model compilation is skipped entirely for chunks that never need it.
+run_chain_units <- function(units, n_cores = NULL) {
+
+    n <- nrow(units)
+    n_cores_used <- resolve_n_cores(n_cores, n)
+    printf("Running %d chain-unit(s) using %d core(s)", n, n_cores_used)
+
+    is_stan <- any(units$method == "stan")
+    stan_model <- NULL
+    if (is_stan) {
+        rstan::rstan_options(auto_write = FALSE)
+        if (file.exists("../cache/poisson_ltdm.rds")) {
+            stan_model <- readRDS("../cache/poisson_ltdm.rds")
+        } else {
+            printf("Building the Stan model")
+            stan_model <- rstan::stan_model(
+                file = "../PoissonLTDM/inst/stan/poisson_ltdm.stan",
+                model_name = "PoissonLTDM")
+            saveRDS(stan_model, file = "../cache/poisson_ltdm.rds")
+        }
+    }
+
+    cl <- parallel::makeCluster(n_cores_used)
+    on.exit(parallel::stopCluster(cl), add = TRUE)
+    doParallel::registerDoParallel(cl)
+    `%dorng%` <- doRNG::`%dorng%`
+
+    current_wd <- getwd()
+    parallel::clusterExport(cl, "current_wd", envir = environment())
+    if (is_stan) parallel::clusterExport(cl, "stan_model", envir = environment())
+
+    # Same rationale as the old code's clusterExport() call: foreach's
+    # auto-export only walks the LEXICAL environment of the %dorng% call,
+    # not the globals run_one_chain()/run_one_chain_unit() actually use --
+    # those must be exported explicitly from .GlobalEnv.
+    parallel::clusterExport(cl,
+        c("run_one_chain", "run_one_chain_unit", "chain_result_filename",
+          "task_seed_base", "task_name_for", "make_chain_inits", "printf",
+          "mu_01", "sigma2_01", "mu_02", "sigma2_02",
+          "nu_01", "eta_01", "nu_02", "eta_02",
+          "ac_ref", "M_is", "M_irls_max", "tol", "R_prerun", "M_sir",
+          "verbose", "print_every", "N_chains", "path_chains",
+          "method_grid", "Tt_grid", "function_grid"),
+        envir = .GlobalEnv)
+
+    parallel::clusterEvalQ(cl, {
+        setwd(current_wd)
+        pkgload::load_all("../PoissonLTDM", debug = FALSE)
+        source("../PoissonLTDM/R/sampler_stan.R")
+    })
+
+    foreach::foreach(i = seq_len(n)) %dorng% {
+        u <- units[i, ]
+        run_one_chain_unit(u$method, u$f, u$Tt, u$N, u$burnin, u$K, u$config_idx, u$replica, u$chain_id,
+                            stan_model = if (u$method == "stan") stan_model else NULL)
+    }
+
+    invisible(NULL)
+}
+
+
+# ---- Main entry point: runs ONE row of calibration_grid (all N_chains
+# chains + aggregation) -- unchanged EXTERNAL call contract from before
+# (same arguments, same return value), just internally a thin wrapper over
+# run_chain_units() + aggregate_task() now. Used by "local" mode's
+# task_id-based single-task runs (see dispatch block); the "cluster"
+# dispatch below calls run_chain_units()/aggregate_task() directly instead,
+# at chunk granularity, for the actual flattening benefit -- see
+# run_chain_units()'s header comment for why that distinction matters. ----
+run_calibration_task <- function(method, f, Tt, N, burnin, K, config_idx, replica = 1) {
+    task_name <- task_name_for(method, f, Tt, N, burnin, K)
+    task_rds  <- file.path(path_results, paste0(task_name, ".rds"))
+    if (file.exists(task_rds)) {
+        printf("Task already run (%s exists) -- skipping entirely.", task_name)
+        return(NULL)
+    }
+
+    units <- data.frame(method = method, f = f, Tt = Tt, N = N, burnin = burnin, K = K,
+                         config_idx = config_idx, replica = replica, chain_id = 1:N_chains,
+                         stringsAsFactors = FALSE)
+    run_chain_units(units, n_cores = NULL)
+
+    aggregate_task(method, f, Tt, N, burnin, K, config_idx, replica)
 }
 
 
 # ---- run_and_save_task(): runs one grid row AND updates summary.csv ----
 #
-# Wraps run_calibration_task() with the summary.csv read-modify-write
-# logic. Used directly by run_mode == "local" below. NOT used by
-# run_mode == "cluster": each PBS job there calls this too (it is what
-# batchMap() dispatches), but concurrent jobs writing to the same
-# summary.csv at once would race/clobber each other, so cluster-mode jobs
-# only produce their own .rds -- calibration_aggregate.R builds
-# summary.csv from those .rds files afterwards, once all jobs are done.
-#
-# Any pre-existing summary.csv row for the same (method, f, Tt, replica)
-# is dropped before appending the new one, so re-running a task after a
-# config change (N, burnin, K, ...) updates that task's row instead of
-# duplicating it. Column set may grow over time (e.g. a method-specific
-# field appearing for the first time) -- rbind() with a mismatched column
-# set errors out rather than silently misaligning columns, which is
-# intentional here.
-#
-# run_calibration_task() returns NULL for an already-checkpointed task
-# (see its own header comment) -- there is nothing new to summarize in
-# that case, so update_summary_csv is skipped and this function returns
-# NULL too. That task's summary.csv row (if any) is left exactly as it
-# was; calibration_aggregate.R is what fills in rows for checkpointed
-# tasks, not this function.
-run_and_save_task <- function(method, f, Tt, N, burnin, K, config_idx, replica = 1, update_summary_csv = TRUE) {
-    summary_row <- run_calibration_task(method, f, Tt, N, burnin, K, config_idx, replica)
-
+# ---- save_summary_row(): the summary.csv read-modify-write logic, on its
+# own -- factored out of run_and_save_task() so callers that already have a
+# summary_row in hand (e.g. the "local all" dispatch below, which calls
+# aggregate_task() directly to avoid run_and_save_task()'s redundant
+# run_chain_units() call -- see run_and_save_task()'s header comment) don't
+# have to go through run_calibration_task() again just to reach this
+# logic. Same behavior as before, unchanged. ----
+save_summary_row <- function(summary_row, update_summary_csv = TRUE) {
     if (is.null(summary_row)) return(invisible(NULL))
 
     printf("Summary row: rhat_max=%.4f, ess_bulk_min=%.1f, elapsed_time=%.2fs",
@@ -745,6 +982,30 @@ run_and_save_task <- function(method, f, Tt, N, burnin, K, config_idx, replica =
     }
 
     summary_row
+}
+
+
+# ---- run_and_save_task(): runs one grid row's chains (via
+# run_calibration_task(), which internally opens its own single-task
+# cluster -- fine for LOCAL SINGLE-TASK use, but see the "local all"
+# dispatch below for why it is NOT reused there) AND updates summary.csv.
+# Used directly by run_mode == "local"'s single-task_id path. NOT used by
+# run_mode == "cluster": each PBS job there calls run_chain_units()/
+# aggregate_task() directly (see the chunk-level batchMap() body below)
+# instead, since concurrent jobs writing to the same summary.csv at once
+# would race/clobber each other, so cluster-mode jobs only produce their
+# own .rds -- calibration_aggregate.R builds summary.csv from those .rds
+# files afterwards, once all jobs are done.
+#
+# run_calibration_task() returns NULL for an already-checkpointed task
+# (see its own header comment) -- there is nothing new to summarize in
+# that case, so update_summary_csv is skipped and this function returns
+# NULL too. That task's summary.csv row (if any) is left exactly as it
+# was; calibration_aggregate.R is what fills in rows for checkpointed
+# tasks, not this function.
+run_and_save_task <- function(method, f, Tt, N, burnin, K, config_idx, replica = 1, update_summary_csv = TRUE) {
+    summary_row <- run_calibration_task(method, f, Tt, N, burnin, K, config_idx, replica)
+    save_summary_row(summary_row, update_summary_csv)
 }
 
 
@@ -794,13 +1055,37 @@ if (run_mode == "local") {
 
     # ---- LOCAL: run task_id (a single row) or "all" rows of the (filtered) grid ----
     if (identical(task_id, "all")) {
-        printf("Running all %d task(s) of the (filtered) grid, sequentially.", n_tasks)
+        # Flatten across every chain-unit of the (filtered) grid and run
+        # them ALL in one maximally-parallel local batch first -- mirrors
+        # simulation.R's local mode ("every task... in ONE maximally-
+        # parallel batch using every physical core"), adapted here to
+        # chain-units (see run_chain_units()'s header comment). Aggregation
+        # (per task, sequential, cheap) happens afterwards -- the
+        # run_and_save_task() calls below will find every chain file
+        # already checkpointed and skip straight to it.
+        chain_grid_filtered <- chain_grid[chain_grid$task_id %in% calibration_grid$task_id, ]
+        printf("Running %d chain-unit(s) locally (%d task(s)), in one parallel batch.",
+               nrow(chain_grid_filtered), n_tasks)
+        run_chain_units(chain_grid_filtered, n_cores = NULL)
+
+        printf("Aggregating %d task(s), sequentially.", n_tasks)
         for (i in seq_len(n_tasks)) {
             task <- calibration_grid[i, ]
             printf("[%d/%d] method=%s, f=%s, Tt=%d, N=%d, burnin=%d, K=%s",
                    i, n_tasks, task$method, task$f, task$Tt, task$N, task$burnin,
                    if (is.na(task$K)) "NA" else task$K)
-            run_and_save_task(task$method, task$f, task$Tt, task$N, task$burnin, task$K, task$config_idx, replica)
+            # aggregate_task() directly (NOT run_and_save_task(), which
+            # would call run_calibration_task() -> run_chain_units() again
+            # -- pointless here since every chain-unit was already run and
+            # checkpointed by the single batch call above; going through
+            # run_and_save_task() would still work correctly (chain
+            # checkpoints make it a fast no-op), but pays a full
+            # makeCluster()/stopCluster() round-trip PER TASK just to reach
+            # that no-op -- confirmed during testing to dominate this
+            # loop's wall-clock time for a grid this size).
+            summary_row <- aggregate_task(task$method, task$f, task$Tt, task$N, task$burnin, task$K,
+                                           task$config_idx, task$replica)
+            save_summary_row(summary_row)
         }
     } else {
         task <- calibration_grid[task_id, ]
@@ -808,7 +1093,7 @@ if (run_mode == "local") {
                task_id, n_tasks, task$method, task$f, task$Tt, task$N, task$burnin,
                if (is.na(task$K)) "NA" else task$K)
 
-        summary_row <- run_and_save_task(task$method, task$f, task$Tt, task$N, task$burnin, task$K, task$config_idx, replica)
+        summary_row <- run_and_save_task(task$method, task$f, task$Tt, task$N, task$burnin, task$K, task$config_idx, task$replica)
     }
 
 } else if (run_mode == "cluster") {
@@ -923,73 +1208,92 @@ if (run_mode == "local") {
 
     reg$cluster.functions <- makeClusterFunctionsTORQUE("calibration_pbs.tmpl")
 
-    # ---- Skip rows whose .rds is already checkpointed ----
+    # ---- Skip chunks whose tasks are ALL already checkpointed ----
     #
-    # run_calibration_task() itself already skips a checkpointed task
-    # (see its header comment) -- but only after a PBS job has been
-    # queued/started for it, i.e. after paying for a full place=excl node
-    # allocation just to check one file and exit. Filtering here avoids
-    # creating those jobs in the first place. Uses task_name_for(), the
-    # same naming convention run_calibration_task() uses for its own
-    # task_rds path.
+    # aggregate_task() itself already skips a checkpointed task (see its
+    # header comment) -- but only after a PBS job has been queued/started
+    # for its whole chunk, i.e. after paying for a full place=excl node
+    # allocation just to find nothing to do. Filtering here avoids creating
+    # those jobs in the first place -- same spirit as the old task-level
+    # filter, just checked per CHUNK (every task in the chunk must already
+    # be done for the whole chunk to be skipped; a chunk with even one
+    # unfinished task still needs its job, though run_chain_units() /
+    # aggregate_task()'s own per-chain and per-task checkpoints mean that
+    # job will skip straight past whatever already finished).
     task_names <- with(calibration_grid, mapply(task_name_for, method, f, Tt, N, burnin, K))
     task_rds_exists <- file.exists(file.path(path_results, paste0(task_names, ".rds")))
-    n_skipped <- sum(task_rds_exists)
-    if (n_skipped > 0) {
-        printf("Skipping %d already-checkpointed task(s) (no job submitted for them):", n_skipped)
-        for (name in task_names[task_rds_exists]) printf("  %s", name)
+    chunk_done <- ave(task_rds_exists, calibration_grid$chunk_id, FUN = all)
+    n_skipped_chunks <- sum(!duplicated(calibration_grid$chunk_id) & chunk_done)
+    if (n_skipped_chunks > 0) {
+        printf("Skipping %d already-fully-checkpointed chunk(s) (no job submitted for them).",
+               n_skipped_chunks)
     }
-    calibration_grid_to_submit <- calibration_grid[!task_rds_exists, ]
+    job_grid_to_submit <- job_grid[!(job_grid$chunk_id %in%
+                                      unique(calibration_grid$chunk_id[chunk_done == TRUE])), ]
 
-    if (nrow(calibration_grid_to_submit) == 0) {
-        printf("Every task in the (filtered) grid is already checkpointed -- nothing to submit.")
+    if (nrow(job_grid_to_submit) == 0) {
+        printf("Every chunk in the (filtered) grid is already checkpointed -- nothing to submit.")
         printf("Run calibration_aggregate.R to build/update summary.csv from the existing .rds files.")
     } else {
 
-    # update_summary_csv = FALSE: see run_and_save_task()'s header comment
-    # -- concurrent jobs must not race on the same summary.csv. N/burnin/K/
-    # config_idx are mapped per-row (like method/f/Tt), not passed via
-    # more.args, since they can now differ between rows of the same method
-    # (see method_configs above) -- only replica is genuinely constant
-    # across the whole grid.
+    # One job per CHUNK (not per task): each job runs run_chain_units() on
+    # every chain-unit of its chunk in one flat, up-to-CHUNK_SIZE_CALIB-way
+    # local cluster -- this is the actual fix for the old "3/20 cores busy"
+    # problem, see run_chain_units()'s header comment -- then aggregates
+    # every task in the chunk sequentially (cheap: just rhat/ESS + a plot
+    # per task, no sampling). summary.csv is still NOT written here (same
+    # reasoning as before: concurrent jobs racing on one file) --
+    # calibration_aggregate.R remains the step that builds it from the
+    # .rds files once every job is done.
     ids <- batchMap(
-        fun = function(method, f, Tt, N, burnin, K, config_idx, replica) {
-            run_and_save_task(method, f, Tt, N, burnin, K, config_idx, replica, update_summary_csv = FALSE)
+        fun = function(chunk_id) {
+            chunk_chain_units <- chain_grid[chain_grid$chunk_id == chunk_id, ]
+            run_chain_units(chunk_chain_units, n_cores = CHUNK_SIZE_CALIB)
+
+            chunk_tasks <- calibration_grid[calibration_grid$chunk_id == chunk_id, ]
+            for (i in seq_len(nrow(chunk_tasks))) {
+                t <- chunk_tasks[i, ]
+                aggregate_task(t$method, t$f, t$Tt, t$N, t$burnin, t$K, t$config_idx, t$replica)
+            }
         },
-        method = calibration_grid_to_submit$method, f = calibration_grid_to_submit$f,
-        Tt = calibration_grid_to_submit$Tt, N = calibration_grid_to_submit$N,
-        burnin = calibration_grid_to_submit$burnin, K = calibration_grid_to_submit$K,
-        config_idx = calibration_grid_to_submit$config_idx,
-        more.args = list(replica = replica),
+        chunk_id = job_grid_to_submit$chunk_id,
         reg = reg
     )
-
     # batchMap()'s returned ids has only a job.id column (not the mapped
-    # method/category) -- but job.id order matches the input vector's
+    # chunk_id/category) -- but job.id order matches the input vector's
     # order exactly (same behavior relied on in simulation.R), so category
     # can be attached directly by position, no join needed.
-    ids$category <- calibration_grid_to_submit$category
+    ids$category <- job_grid_to_submit$category
 
     # Per-category walltime (leve/medio/pesado), mirroring simulation.R's
-    # per-category submitJobs loop -- replaces the previous single
-    # walltime_hours=3 applied to every job regardless of cost. Schedulers
-    # typically use requested walltime for backfilling decisions, and a
-    # long requested walltime can make a job harder to slot in even when
-    # physical nodes are free (observed only 2 jobs running concurrently
-    # out of 18 submitted despite place=excl nodes apparently being
-    # available, under the old blanket-3h scheme) -- giving the many
-    # cheap/quick jobs their own short walltime bucket should let more of
-    # them backfill concurrently instead of all queuing behind stan-sized
-    # requests.
+    # per-category submitJobs loop. ncpus=CHUNK_SIZE_CALIB (18), not
+    # N_chains (3) -- this is the actual change that fixes node
+    # under-utilization: the OLD code requested ncpus=N_chains=3 per job
+    # while place=excl still reserved the whole 20-core node regardless,
+    # leaving 17 cores idle for the job's entire walltime. Requesting 18
+    # here doesn't change place=excl's node-level reservation either, but
+    # it now matches what run_chain_units() actually uses inside the job,
+    # which is the number that was wasted before.
     for (cat in unique(ids$category)) {
         cat_ids <- ids[ids$category == cat, "job.id", drop = FALSE]
-        submitJobs(cat_ids, resources = list(ncpus = N_chains, walltime_hours = walltime_hours_for(cat)), reg = reg)
+        submitJobs(cat_ids,
+                   resources = list(ncpus = CHUNK_SIZE_CALIB, walltime_hours = walltime_hours_for(cat),
+                                     max.concurrent.jobs = 10),
+                   reg = reg)
         printf("Submitted %d job(s) for category '%s' (walltime=%gh).",
                nrow(cat_ids), cat, walltime_hours_for(cat))
     }
 
     printf("Submitted %d job(s) total to the cluster (registry: %s).", nrow(ids), reg$file.dir)
-    printf("Check progress with batchtools::getStatus(loadRegistry(\"registry_calibration\")).")
+    printf("Use check_progress_calibration.R to monitor.")
+    printf("NOTE: submitJobs() blocks (in THIS R session) until every requested job has")
+    printf("      been dispatched -- not until they finish. max.concurrent.jobs=10 is a")
+    printf("      real, global throttle (checked against the live scheduler via")
+    printf("      getBatchIds(), not a per-category counter), so submitting multiple")
+    printf("      categories in one run is safe -- the true 10-job cap is respected")
+    printf("      across all of them. But because this call can block for a long time")
+    printf("      (hours, for the larger categories), run this inside tmux/screen or")
+    printf("      with nohup, never directly in an SSH session that might disconnect.")
     printf("Once all jobs are done, run calibration_aggregate.R to build summary.csv.")
 
     }
