@@ -1,0 +1,37 @@
+#!/bin/bash
+#PBS -N <%= job.name %>
+#PBS -l select=1:ncpus=<%= resources$ncpus %>
+#PBS -l place=excl
+#PBS -l walltime=<%= sprintf("%02d:00:00", resources$walltime_hours) %>
+#PBS -j oe
+#PBS -o /dev/null
+
+# No -q directive: let RouteQ decide (Seq_short/Seq_long cap ncpus at 1,
+# so ncpus=20 can only be routed to Parallel_*) -- confirmed empirically
+# during planning (queue = Parallel_shortX for every job so far).
+
+# Redirect all output directly, from inside the script, to the same NFS
+# path batchtools expects the log at -- instead of relying on PBS's own
+# -o/-j oe stage-out mechanism. That mechanism (absolute, hostname-
+# qualified NFS path in Output_Path) delivered nothing during testing
+# (Exit_status=0, job ran and wrote its real results correctly, but
+# neither the PBS spool .OU file nor the batchtools log destination ever
+# received any content -- Stageout_status=1, exact meaning unconfirmed
+# even against the PBS Pro reference docs). Direct NFS writes from the
+# compute node are already proven reliable all session (every .rds result
+# file is written this same way), so this sidesteps PBS's separate
+# staging subsystem entirely instead of depending on it.
+exec > "<%= log.file %>" 2>&1
+
+echo "=== PBS job diagnostics ==="
+echo "PBS_JOBID:  $PBS_JOBID"
+echo "PBS_QUEUE:  $PBS_QUEUE"
+echo "hostname:   $(hostname)"
+echo "Submitted:  $(date)"
+echo "==========================="
+
+source ~/setup_env.sh
+
+cd ~/cobalebeb2027/simulation
+
+Rscript -e 'batchtools::doJobCollection("<%= uri %>")'

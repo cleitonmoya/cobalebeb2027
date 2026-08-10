@@ -29,7 +29,7 @@
 #PBS -o <%= log.file %>
 #PBS -l select=1:ncpus=<%= resources$ncpus %>
 #PBS -l place=excl
-#PBS -l walltime=<%= sprintf("%02d:00:00", if (is.null(resources$walltime_hours)) 6 else resources$walltime_hours) %>
+#PBS -l walltime=<%= { h <- if (is.null(resources$walltime_hours)) 6 else resources$walltime_hours; total_min <- round(h * 60); sprintf("%02d:%02d:00", total_min %/% 60, total_min %% 60) } %>
 
 source ~/setup_env.sh
 cd ~/cobalebeb2027/simulation/

@@ -106,6 +106,36 @@ task_name_for <- function(method, f, Tt, N, burnin, K) {
     if (!is.na(K)) base <- paste0(base, "_K", K)
     base
 }
+# NOTE: this name is built from (method, f, Tt, N, burnin, K) only, not
+# config_idx -- relies on every row of method_configs having a distinct
+# (N, burnin, K) combination within the same method (true for all 13 rows
+# above). If a future edit ever adds two config rows for the same method
+# with identical (N, burnin, K) -- e.g. to vary something not reflected in
+# the file name -- their .rds/.pdf paths (and checkpoint-skip logic) would
+# collide silently.
+
+# ---- walltime_hours_for(): per-category walltime bucket, same three-tier
+# design as simulation.R's walltime_hours_for() ----
+#
+# Values are generous margins over the worst measured/estimated time
+# within each category at Tt=1600 (the worst case in the grid): "leve"
+# covers amh_montoril's N<=110000 configs and the sir_*/pg_as-K<=50
+# configs (well under a minute even at Tt=1600, calibration's N_chains=3
+# run in parallel so wall time tracks a single chain's time, not 3x it);
+# "medio" covers amh_montoril's N=220000 config and pg_as's K=100/200 or
+# N=22000 configs (estimated single-digit minutes, extrapolating linearly
+# from the K=100/N=11000 production timings); "pesado" is stan alone
+# (~2.1h measured at Tt=1600). Same as calibration_phase.R's method_configs
+# category comment: re-bucket a row by hand if a probe run shows it
+# landing in the wrong tier before submitting the full grid.
+walltime_hours_for <- function(category) {
+    switch(category,
+        leve   = 0.5,
+        medio  = 1,
+        pesado = 2.5,
+        stop(sprintf("Unknown category: %s", category))
+    )
+}
 
 # ==========================================================================
 # ---- Run control ----
@@ -125,7 +155,7 @@ grid_subset <- NULL
 # running a small grid_subset locally without going through batchtools/PBS
 # at all (e.g. a handful of cheap tasks), or for a first end-to-end smoke
 # test of the whole grid before committing to run_mode == "cluster".
-task_id <- 1
+task_id <- "all"
 
 # ==========================================================================
 
@@ -151,21 +181,56 @@ dir.create(path_plots,   showWarnings = FALSE, recursive = TRUE)
 # stay apples-to-apples (amh_montoril and pg_as both show degradation at
 # Tt=1600 that is treated as a genuine finding, not "fixed" by inflating N
 # further within a single config row).
+#
+# category (leve/medio/pesado) drives which walltime bucket a task's PBS
+# job is submitted under (see walltime_hours_for() and the "cluster"
+# dispatch branch below) -- same three-tier design as simulation.R's
+# R_config, adapted here per CONFIG ROW rather than per method, since a
+# single method's wall-clock cost now varies substantially across its own
+# rows (e.g. amh_montoril's N=55000 vs N=220000 configs, or pg_as's K=50
+# vs K=200 configs) -- a per-method category would force the lightest and
+# heaviest config of the same method into the same walltime bucket.
+#
+# Thresholds below are rough, deliberately conservative buckets based on
+# the production/calibration timings already measured for these samplers
+# at Tt=1600 (the worst case in the grid): amh_montoril and the sir_*
+# methods are cheap regardless of N in the ranges used here (well under a
+# minute even at the largest N); pg_as's cost scales with K*N and crosses
+# into noticeably-longer territory at K=200; stan is in a class of its own
+# (~2h at Tt=1600 already measured). Re-bucket a row by hand if a probe run
+# (see "Sanity check" in the walltime discussion) shows it landing in the
+# wrong tier.
 method_configs <- rbind(
-    data.frame(method = "amh_montoril",  N = 55000,  burnin = 5000,  K = NA),
-    data.frame(method = "amh_montoril",  N = 75000,  burnin = 5000,  K = NA),
-    data.frame(method = "amh_montoril",  N = 110000, burnin = 10000, K = NA),
-    data.frame(method = "pg_as",         N = 11000,  burnin = 1000,  K = 100),
-    data.frame(method = "sir_laplace",   N = 11000,  burnin = 1000,  K = NA),
-    data.frame(method = "sir_collapsed", N = 11000,  burnin = 1000,  K = NA),
-    data.frame(method = "stan",          N = 11000,  burnin = 1000,  K = NA)
+    data.frame(method = "amh_montoril",  N = 55000,  burnin = 5000,  K = NA, category = "leve"),
+    data.frame(method = "amh_montoril",  N = 75000,  burnin = 5000,  K = NA, category = "leve"),
+    data.frame(method = "amh_montoril",  N = 110000, burnin = 10000, K = NA, category = "leve"),
+    data.frame(method = "amh_montoril",  N = 220000, burnin = 20000, K = NA, category = "medio"),
+    data.frame(method = "pg_as",         N = 11000,  burnin = 1000,  K = 50,  category = "leve"),
+    data.frame(method = "pg_as",         N = 11000,  burnin = 1000,  K = 100, category = "medio"),
+    data.frame(method = "pg_as",         N = 11000,  burnin = 1000,  K = 200, category = "medio"),
+    data.frame(method = "pg_as",         N = 22000,  burnin = 2000,  K = 50,  category = "medio"),
+    data.frame(method = "pg_as",         N = 22000,  burnin = 2000,  K = 100, category = "medio"),
+    data.frame(method = "pg_as",         N = 22000,  burnin = 2000,  K = 200, category = "pesado"),
+    data.frame(method = "sir_laplace",   N = 11000,  burnin = 1000,  K = NA, category = "leve"),
+    data.frame(method = "sir_collapsed", N = 11000,  burnin = 1000,  K = NA, category = "leve"),
+    data.frame(method = "stan",          N = 11000,  burnin = 1000,  K = NA, category = "pesado")
 )
+
+# config_idx: 1st, 2nd, 3rd... config row for a given method, in the order
+# written above -- used by the seed formula below to distinguish rows that
+# share (method, f, Tt) but differ in (N, burnin, K), so that e.g.
+# amh_montoril's N=55000 and N=220000 configs at the same (f, Tt) get
+# different (and reproducible) seeds instead of colliding.
+method_configs$config_idx <- ave(seq_len(nrow(method_configs)),
+                                  method_configs$method, FUN = seq_along)
 
 
 # ---- Calibration grid ----
 #
-# Full calibration phase: cross-join of method_configs (7 rows above) with
-# (f, Tt) (2 x 2 = 4 combinations), giving 28 tasks. method_grid/Tt_grid/
+# Full calibration phase: cross-join of method_configs (13 rows above)
+# with (f, Tt) (2 x 2 = 4 combinations), giving 52 tasks, plus 12 more
+# from the pg_as x sinusoidal extension below (6 pg_as configs x 2 Tt
+# values) -- 64 tasks total. method_grid/Tt_grid/
 # function_grid below are the FULL reference grids (used for the
 # deterministic seed formula) and stay complete regardless of grid_subset
 # -- the seed formula must be able to place ANY (method, f, Tt) at its
@@ -181,6 +246,21 @@ f_Tt_grid <- expand.grid(
 )
 
 calibration_grid <- merge(method_configs, f_Tt_grid, by = NULL)
+
+# pg_as-only extension: sinusoidal has no changepoints, unlike the
+# constant/quadratic pair above -- the cleanest scenario for separating
+# "K too small" (degeneracy accumulates regardless of local dynamics) from
+# "degeneracy near changepoints" (the original calibration hypothesis) as
+# the explanation for pg_as's collapse at large Tt documented in the
+# simulation results. Tt in {200, 1600} only (not the full 4-value grid),
+# matching the same "worst/best case" spirit as f_Tt_grid above.
+pg_as_sinusoidal_grid <- merge(
+    method_configs[method_configs$method == "pg_as", ],
+    expand.grid(f = "sinusoidal", Tt = c(200, 1600), stringsAsFactors = FALSE),
+    by = NULL
+)
+calibration_grid <- rbind(calibration_grid, pg_as_sinusoidal_grid)
+
 calibration_grid <- calibration_grid[order(calibration_grid$method, calibration_grid$f,
                                             calibration_grid$Tt, calibration_grid$N), ]
 rownames(calibration_grid) <- NULL
@@ -226,9 +306,6 @@ print_every  <- 1000
 plots        <- TRUE
 compute_rhat <- TRUE
 compute_ess  <- TRUE
-
-
-
 
 
 # ---- Physical core count (identical logic to test_cpp.R / test_stan.R) ----
@@ -363,11 +440,6 @@ build_summary_row <- function(diag, method, f, Tt, replica, N, burnin, K, elapse
 
 
 # ---- Chain initialization (identical scheme to test_cpp.R / test_stan.R) ----
-#
-# theta1_dispersed distinguishes samplers where theta1 is genuine Markov
-# chain state (amh_montoril, pg_as -- dispersion matters for R_hat) from
-# samplers where theta1 is redrawn via SIR/IS or HMC every iteration
-# (sir_laplace, sir_collapsed, stan -- zero-init is sufficient).
 make_chain_inits <- function(chain_id, seed, y, Tt, method) {
     theta1_ref   <- log(y + 0.5)
     theta2_ref   <- c(diff(theta1_ref), 0)
@@ -383,13 +455,8 @@ make_chain_inits <- function(chain_id, seed, y, Tt, method) {
     W1_init <- W1_ref * exp(rnorm(1, 0, sd = 1))
     W2_init <- W2_ref * exp(rnorm(1, 0, sd = 1))
 
-    theta1_dispersed <- method %in% c("amh_montoril", "pg_as")
-    if (theta1_dispersed) {
-        theta1_init <- theta1_ref + rnorm(Tt, 0, sd = 2 * sqrt(W1_ref))
-    } else {
-        theta1_init <- numeric(Tt)
-    }
-    theta2_init <- numeric(Tt)
+    theta1_init <- theta1_ref + rnorm(Tt, 0, sd = 2 * sqrt(W1_ref))
+    theta2_init <- theta2_ref + rnorm(Tt, 0, sd = 2 * sqrt(W2_ref))
 
     list(chain_id = chain_id, seed = seed,
          theta_01 = theta_01_init, theta_02 = theta_02_init,
@@ -453,7 +520,7 @@ run_one_chain_cpp <- function(init, method, y, N, K) {
 # not looked up from a per-method table -- a method can be run with more
 # than one (N, burnin, K) configuration (see method_configs above), so the
 # caller must say which one this particular task is.
-run_calibration_task <- function(method, f, Tt, N, burnin, K, replica = 1) {
+run_calibration_task <- function(method, f, Tt, N, burnin, K, config_idx, replica = 1) {
 
     task_name    <- task_name_for(method, f, Tt, N, burnin, K)
     task_rds     <- file.path(path_results, paste0(task_name, ".rds"))
@@ -494,15 +561,22 @@ run_calibration_task <- function(method, f, Tt, N, burnin, K, replica = 1) {
     if (Tt == 800)  t_obs <- c(100, 300, 500, 700)
     if (Tt == 1600) t_obs <- c(400, 800, 1200, 1600)
 
-    # ---- Seed (same deterministic formula used throughout the project) ----
+    # ---- Seed (extends the project's deterministic formula with
+    # config_idx, so that different (N, burnin, K) rows of the same method
+    # at the same (f, Tt) -- e.g. amh_montoril's N=55000 vs N=220000 configs
+    # -- get distinct, reproducible seeds instead of colliding on the same
+    # seed_base and silently sharing the same RNG stream. The 1e4 slot is
+    # left empty (Tt_idx*1e5, config_idx*1e3) as headroom for a method ever
+    # growing past 9 config rows without needing to touch this formula
+    # again.) ----
     method_idx <- match(method, method_grid)
     Tt_idx     <- match(Tt, Tt_grid)
     f_idx      <- match(f, function_grid)
-    seed_base  <- method_idx * 1e5 + f_idx * 1e4 + Tt_idx * 1e3 + replica * 10
+    seed_base  <- method_idx * 1e7 + f_idx * 1e6 + Tt_idx * 1e5 + config_idx * 1e3 + replica * 10
 
-    printf("Running %s for %s, seed_base=%d, N=%d, burnin=%d%s",
+    printf("Running %s for %s, seed_base=%d, N=%d, burnin=%d%s, config_idx=%d",
            method, source_name, seed_base, N, burnin,
-           if (!is.na(K)) sprintf(", K=%d", K) else "")
+           if (!is.na(K)) sprintf(", K=%d", K) else "", config_idx)
 
     # ---- Chain initializations ----
     chain_inits <- lapply(1:N_chains, function(k) {
@@ -642,8 +716,8 @@ run_calibration_task <- function(method, f, Tt, N, burnin, K, replica = 1) {
 # NULL too. That task's summary.csv row (if any) is left exactly as it
 # was; calibration_aggregate.R is what fills in rows for checkpointed
 # tasks, not this function.
-run_and_save_task <- function(method, f, Tt, N, burnin, K, replica = 1, update_summary_csv = TRUE) {
-    summary_row <- run_calibration_task(method, f, Tt, N, burnin, K, replica)
+run_and_save_task <- function(method, f, Tt, N, burnin, K, config_idx, replica = 1, update_summary_csv = TRUE) {
+    summary_row <- run_calibration_task(method, f, Tt, N, burnin, K, config_idx, replica)
 
     if (is.null(summary_row)) return(invisible(NULL))
 
@@ -726,7 +800,7 @@ if (run_mode == "local") {
             printf("[%d/%d] method=%s, f=%s, Tt=%d, N=%d, burnin=%d, K=%s",
                    i, n_tasks, task$method, task$f, task$Tt, task$N, task$burnin,
                    if (is.na(task$K)) "NA" else task$K)
-            run_and_save_task(task$method, task$f, task$Tt, task$N, task$burnin, task$K, replica)
+            run_and_save_task(task$method, task$f, task$Tt, task$N, task$burnin, task$K, task$config_idx, replica)
         }
     } else {
         task <- calibration_grid[task_id, ]
@@ -734,7 +808,7 @@ if (run_mode == "local") {
                task_id, n_tasks, task$method, task$f, task$Tt, task$N, task$burnin,
                if (is.na(task$K)) "NA" else task$K)
 
-        summary_row <- run_and_save_task(task$method, task$f, task$Tt, task$N, task$burnin, task$K, replica)
+        summary_row <- run_and_save_task(task$method, task$f, task$Tt, task$N, task$burnin, task$K, task$config_idx, replica)
     }
 
 } else if (run_mode == "cluster") {
@@ -873,35 +947,48 @@ if (run_mode == "local") {
     } else {
 
     # update_summary_csv = FALSE: see run_and_save_task()'s header comment
-    # -- concurrent jobs must not race on the same summary.csv. N/burnin/K
-    # are mapped per-row (like method/f/Tt), not passed via more.args,
-    # since they can now differ between rows of the same method (see
-    # method_configs above) -- only replica is genuinely constant across
-    # the whole grid.
+    # -- concurrent jobs must not race on the same summary.csv. N/burnin/K/
+    # config_idx are mapped per-row (like method/f/Tt), not passed via
+    # more.args, since they can now differ between rows of the same method
+    # (see method_configs above) -- only replica is genuinely constant
+    # across the whole grid.
     ids <- batchMap(
-        fun = function(method, f, Tt, N, burnin, K, replica) {
-            run_and_save_task(method, f, Tt, N, burnin, K, replica, update_summary_csv = FALSE)
+        fun = function(method, f, Tt, N, burnin, K, config_idx, replica) {
+            run_and_save_task(method, f, Tt, N, burnin, K, config_idx, replica, update_summary_csv = FALSE)
         },
         method = calibration_grid_to_submit$method, f = calibration_grid_to_submit$f,
         Tt = calibration_grid_to_submit$Tt, N = calibration_grid_to_submit$N,
         burnin = calibration_grid_to_submit$burnin, K = calibration_grid_to_submit$K,
+        config_idx = calibration_grid_to_submit$config_idx,
         more.args = list(replica = replica),
         reg = reg
     )
 
-    # walltime_hours = 3 covers every method/Tt combination with generous
-    # margin -- the most expensive case measured during calibration (stan,
-    # Tt=1600) took ~2.1h for 3 chains; amh_montoril/pg_as/sir_laplace/
-    # sir_collapsed are all well under an hour even at Tt=1600. Reduced
-    # from an initial 6h: schedulers typically use requested walltime for
-    # backfilling decisions, and a long requested walltime can make a job
-    # harder to slot in even when physical nodes are free -- observed only
-    # 2 jobs running concurrently out of 18 submitted despite place=excl
-    # nodes apparently being available, which requesting less walltime
-    # (while still safely covering the measured worst case) may help with.
-    submitJobs(ids, resources = list(ncpus = N_chains, walltime_hours = 3), reg = reg)
+    # batchMap()'s returned ids has only a job.id column (not the mapped
+    # method/category) -- but job.id order matches the input vector's
+    # order exactly (same behavior relied on in simulation.R), so category
+    # can be attached directly by position, no join needed.
+    ids$category <- calibration_grid_to_submit$category
 
-    printf("Submitted %d job(s) to the cluster (registry: %s).", nrow(ids), reg$file.dir)
+    # Per-category walltime (leve/medio/pesado), mirroring simulation.R's
+    # per-category submitJobs loop -- replaces the previous single
+    # walltime_hours=3 applied to every job regardless of cost. Schedulers
+    # typically use requested walltime for backfilling decisions, and a
+    # long requested walltime can make a job harder to slot in even when
+    # physical nodes are free (observed only 2 jobs running concurrently
+    # out of 18 submitted despite place=excl nodes apparently being
+    # available, under the old blanket-3h scheme) -- giving the many
+    # cheap/quick jobs their own short walltime bucket should let more of
+    # them backfill concurrently instead of all queuing behind stan-sized
+    # requests.
+    for (cat in unique(ids$category)) {
+        cat_ids <- ids[ids$category == cat, "job.id", drop = FALSE]
+        submitJobs(cat_ids, resources = list(ncpus = N_chains, walltime_hours = walltime_hours_for(cat)), reg = reg)
+        printf("Submitted %d job(s) for category '%s' (walltime=%gh).",
+               nrow(cat_ids), cat, walltime_hours_for(cat))
+    }
+
+    printf("Submitted %d job(s) total to the cluster (registry: %s).", nrow(ids), reg$file.dir)
     printf("Check progress with batchtools::getStatus(loadRegistry(\"registry_calibration\")).")
     printf("Once all jobs are done, run calibration_aggregate.R to build summary.csv.")
 
