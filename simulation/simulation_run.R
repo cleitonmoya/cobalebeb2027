@@ -1,4 +1,4 @@
-# simulation/simulation.R
+# simulation/simulation_run.R
 #
 # Full simulation grid (Estrategia C):
 #   - R=200 for the 4 compared methods (montoril, pg_apf, sir_laplace,
@@ -7,7 +7,7 @@
 #   - 4 functions x 4 Tt values
 #
 # Architecture mirrors calibration_phase.R: single file, re-sourced by
-# batchtools inside every job (source = "simulation.R"), with the same
+# batchtools inside every job (source = "simulation_run.R"), with the same
 # guard mechanism to prevent recursive dispatch. See that file's comments
 # for the detailed rationale behind each guard; not re-explained here
 # except where this script differs.
@@ -99,33 +99,35 @@ archive_registry <- function(reason, registry_dir) {
 # ---- Run control ----
 # ==========================================================================
 #
-# run_mode and grid_subset are defined in run_config.R (same directory),
+# run_mode and grid_subset are defined in simulation_grid_config.R (same directory),
 # not inline here -- so changing what runs (which grid subset, local vs
 # cluster) only requires editing that small file directly on the cluster,
-# never re-sending simulation.R itself. See run_config.R for the syntax
+# never re-sending simulation_run.R itself. See simulation_grid_config.R for the syntax
 # and commented examples.
 
-source("run_config.R", local = FALSE)
+source("simulation_grid_config.R", local = FALSE)
 
 # ==========================================================================
 
 path_data <- "../data/simulated"
-path_results <- "results"
+path_results <- "../results"
 path_results_partial <- sprintf("%s/%s", path_results, "partial")
 dir.create(path_results_partial, showWarnings = FALSE, recursive = TRUE)
 
 verbose <- TRUE   # print information in the console
 
-# General simulation parameters
-N <- 10000          # number of iterations
-burnin <- 1000
+# N/burnin/K: per-method now (see R_config below), NOT global constants --
+# this file previously had N<-10000/burnin<-1000/K<-50 as single global
+# values used for every method's task, which never reflected the
+# calibration study's per-method findings at all (amh_montoril needed
+# N=110000/burnin=10000 to reach its efficiency plateau; pg_as needed
+# N=22000/burnin=2000/K=200 to get rhat comfortably under 1.01; both were
+# silently running at N=10000 here, 11x and 2.2x too small respectively --
+# caught before launching production, not after).
 
 # Adaptive Metropolis hyperparameters (montoril)
 varsigma2_scal <- 0.02     # initial varsigma2
 ac_ref <- 0.44             # acceptance ratio target
-
-# Particle Gibbs hyperparameter
-K <- 50  # Number of particles
 
 # SIR Laplace and SIR Collapsed hyperparameters
 M_is <- 3             # Number of particles - IS for W1 integrated likelihood
@@ -153,11 +155,29 @@ theta1_tilde_scal <- 0 # sir_laplace and sir_collapsed
 #####
 # Build the task grid (Estrategia C) and chunk it (k* = 20)
 
-# ---- Per-method category and replica count ----
+# ---- Per-method category, replica count, and sampler hyperparameters ----
+#
+# N/burnin/K per method, not global -- each row here is the config the
+# calibration study actually validated/decided for that method:
+#   - montoril:      N=110000/burnin=10000, the efficiency-plateau pick
+#     (peak ESS/s among the 5 configs tested; Tt=1600's rhat>1.01 is a
+#     documented structural finding for this method, not something a
+#     larger N resolves -- see the rhat-vs-N extrapolation from the
+#     N=520000 calibration point).
+#   - pg_apf:        N=22000/burnin=2000/K=200, prioritizing the lowest
+#     rhat achieved (1.005) over the cheaper K=100 config (rhat=1.008 at
+#     roughly half the cost) -- explicit choice, not the cost-optimal one.
+#   - sir_laplace/sir_collapsed/stan: N=11000/burnin=1000 is the only
+#     config calibration tested for these three, so it is the
+#     calibration-validated config by construction, not a choice among
+#     alternatives the way montoril/pg_apf's configs were.
 R_config <- data.frame(
 	method   = c("montoril", "pg_apf",  "sir_laplace", "sir_collapsed", "stan"),
 	category = c("leve",     "medio",   "leve",        "leve",          "pesado"),
 	R        = c(200,        200,       200,           200,             50),
+	N        = c(110000,     22000,     11000,         11000,           11000),
+	burnin   = c(10000,      2000,      1000,          1000,            1000),
+	K        = c(NA,         200,       NA,            NA,              NA),
 	stringsAsFactors = FALSE
 )
 
@@ -172,31 +192,158 @@ task_grid <- do.call(rbind, lapply(seq_len(nrow(R_config)), function(i) {
 	expand.grid(
 		Tt = Tt_grid_ref, f = functions_grid_ref, replica = seq_len(R_config$R[i]),
 		method = R_config$method[i], category = R_config$category[i],
+		N = R_config$N[i], burnin = R_config$burnin[i], K = R_config$K[i],
 		stringsAsFactors = FALSE
 	)
 }))
 
-task_grid$seed <- match(task_grid$method, methods_grid_ref) * 1e5 +
-					match(task_grid$f, functions_grid_ref) * 1e4 +
-					match(task_grid$Tt, Tt_grid_ref) * 1e3 +
-					task_grid$replica * 10
+	# ---- Seed formula ----
+	#
+	#   seed(m, g, tau, r) = m*1e7 + g*1e6 + tau*1e5 + 10000 + r*10
+	#
+	# where m = match(method, methods_grid_ref), g = match(f,
+	# functions_grid_ref), tau = match(Tt, Tt_grid_ref), r = replica.
+	#
+	# Deliberately matches calibration_run.R's task_seed_base() as closely
+	# as possible:
+	#
+	#   seed_calib(m, g, tau, c, r) = m*1e7 + g*1e6 + tau*1e5 + c*1e3 + r*10
+	#
+	# Same leading multipliers for method/f/Tt (1e7/1e6/1e5) -- these were
+	# kept byte-for-byte identical on purpose, so the leading digits of a
+	# seed identify (method, f, Tt) the same way in both files, and the
+	# same replica*10 trailing term, reused verbatim from calibration's
+	# own formula rather than invented fresh.
+	#
+	# The one deliberate difference is the "+10000" in place of
+	# calibration's "c*1e3" (c = config_idx, calibration's per-method
+	# index into its own candidate N/burnin/K configs -- a dimension
+	# production does not have, since each method here runs exactly ONE
+	# config, the one calibration decided on). This is NOT a stylistic
+	# choice or a "config_idx=0" placeholder -- it exists to rule out a
+	# real bias, confirmed in discussion:
+	#
+	#   Naively using config_idx=0 (i.e. just m*1e7+g*1e6+tau*1e5+r*10,
+	#   dropping the c*1e3 term entirely) does NOT prevent collisions,
+	#   because calibration's own replica is FIXED AT 1 for the whole
+	#   calibration phase (see calibration_run.R) -- so calibration's
+	#   entire occupied sub-block below tau's digit is small, spanning
+	#   only c*1000 + 1*10 + chain_offset(0..2) for c = 1..6 (pg_as has
+	#   the most candidate configs, 6), i.e. values 1010-6012. Production's
+	#   replica genuinely varies (1..200 here), so replica*10 ALONE spans
+	#   10-2000, which overlaps that exact 1010-6012 band once replica
+	#   exceeds ~100 -- confirmed as a real, reproducible collision (18
+	#   exact seed matches across the full production grid against every
+	#   calibration seed, all of them production replica=101 landing
+	#   exactly on some method/f/Tt's calibration config_idx=1, chain=1
+	#   seed). This is a genuine look-ahead/data-snooping risk, not merely
+	#   cosmetic: for the 3 methods calibration tested only ONE config for
+	#   (sir_laplace, sir_collapsed, stan), that single config IS the one
+	#   production uses, so config_idx=1 there is not a hypothetical
+	#   collision target -- it is exactly the calibration chain whose
+	#   good convergence at that specific seed is *why* that config was
+	#   chosen. Reusing that same seed for production's replica=1 would
+	#   hand that one replica a selection advantage the other 199 never
+	#   had.
+	#
+	#   The fix is not a bigger/smaller config_idx marker -- no single
+	#   marker value avoids the overlap, since it is replica*10 itself
+	#   (not a nonzero config_idx digit) that encroaches on calibration's
+	#   occupied range. Adding a flat +10000 offset instead pushes
+	#   production's ENTIRE sub-block (10010-12000 for replica=1..200)
+	#   above calibration's maximum possible occupied value (config_idx
+	#   up to 6, or generously up to 9, gives at most ~9012) -- a
+	#   structural, not incidental, separation. Verified by brute-force
+	#   intersection of the full sets: all 13600 production task seeds
+	#   against all 204 calibration seeds (68 tasks x 3 chains) share ZERO
+	#   values.
+	#
+	# Concrete examples (f=constant, Tt=1600):
+	#   amh_montoril: calibration's chosen config (N=110000) is
+	#     config_idx=3 there -> seed 11403010 (chain 1). Production
+	#     replica=1 -> seed 11410010. Production replica=101 -> 11411010.
+	#     Neither collides with 11403010, nor with any of the other 4
+	#     candidate configs' seeds (11401010, 11402010, 11404010, 11405010).
+	#   sir_laplace: calibration's ONLY config (N=11000, the one production
+	#     also uses) is config_idx=1 -> seed 31401010 (chain 1). Production
+	#     replica=1 -> seed 31410010 -- close in magnitude but NOT equal,
+	#     by the +10000 construction above, not by chance.
+	#
+	# Confirmed this poses no RNG-range problem either: both phases only
+	# ever call R's own set.seed(seed) (never pass a seed into the Rcpp
+	# samplers directly), and the samplers themselves use RNGScope +
+	# R::norm_rand() (confirmed directly in sir_laplace.cpp's source),
+	# i.e. R's own centralized RNG state -- so the only limit that matters
+	# is R's own .Machine$integer.max (2147483647). The largest seed this
+	# formula can produce (method=5, f=4, Tt=4, replica=200) is 54410500,
+	# about 2.5% of that limit.
+	task_grid$seed <- match(task_grid$method, methods_grid_ref) * 1e7 +
+						match(task_grid$f, functions_grid_ref) * 1e6 +
+						match(task_grid$Tt, Tt_grid_ref) * 1e5 +
+						10000 +
+						task_grid$replica * 10
 
 CHUNK_SIZE <- 20L
+
+# ---- Per-(method, Tt) chunk size override ----
+#
+# CHUNK_SIZE=20 assumes 20 tasks can run concurrently on one 128GB-RAM
+# node (see simulation_pbs.tmpl: place=excl reserves the WHOLE node
+# regardless of the ncpus requested, so all 20 tasks in a chunk share
+# that one node's RAM budget). This holds for every method EXCEPT
+# montoril at Tt=1600: N=110000 there means each task's raw theta1_hist+
+# theta2_hist alone is N*Tt*8*2 bytes = ~2.82GB, so 20 of them running at
+# once is ~56.3GB of raw history BEFORE R's own overhead (temporary
+# copies, the parallel diagnostics computation, gc lag) -- confirmed as
+# the actual cause of a real production failure: 40 consecutive chunk
+# jobs (batchtools job.id 297-336) all failed identically with "Error in
+# unserialize(socklist[[n]]) : error reading from connection" right after
+# "Running 20 task(s) using 20 core(s)", with zero task-level progress in
+# any of them -- the exact signature of an OOM-killed parallel worker
+# (its socket becomes unreadable mid-read). 40 is not a coincidence: it
+# is EXACTLY montoril's Tt=1600 chunk count (200 replicas x 4 functions =
+# 800 tasks / CHUNK_SIZE=20 = 40 chunks), and no other method/Tt
+# combination showed any failures. pg_apf (N=22000) and sir_laplace/
+# sir_collapsed (N=11000) at the same Tt=1600 are ~5-10x lighter per task
+# (0.56GB and 0.28GB respectively) and were never at risk.
+#
+# The fix: halve concurrency (10 tasks/chunk instead of 20) specifically
+# for montoril+Tt=1600, giving each task roughly double the RAM headroom
+# on the same 128GB node (10 tasks x ~2.82GB raw = ~28.2GB, leaving ample
+# room for R's overhead) -- at the cost of doubling wall-clock time and
+# PBS job count for just this one (method, Tt) slice, not the whole grid.
+chunk_size_for <- function(method, Tt) {
+	ifelse(method == "montoril" & Tt == 1600, 10L, CHUNK_SIZE)
+}
 
 task_grid <- task_grid[order(task_grid$category, task_grid$Tt, task_grid$method,
 							  task_grid$f, task_grid$replica), ]
 rownames(task_grid) <- NULL
 
-task_grid$chunk_index <- ave(seq_len(nrow(task_grid)),
-							  paste(task_grid$category, task_grid$Tt),
-							  FUN = function(idx) ceiling(seq_along(idx) / CHUNK_SIZE))
+# ncpus per row: the chunk size for THIS task's (method, Tt) -- almost
+# always CHUNK_SIZE, except montoril/Tt=1600 (see chunk_size_for()).
+task_grid$ncpus <- chunk_size_for(task_grid$method, task_grid$Tt)
 
-task_grid$chunk_id <- sprintf("%s_Tt%04d_%03d", task_grid$category, task_grid$Tt, task_grid$chunk_index)
+# Grouped by (category, Tt, method) now, not just (category, Tt) -- so a
+# method with an overridden chunk_size_for() gets ITS OWN chunk sequence,
+# sized correctly, rather than being mixed into chunks sized for whatever
+# CHUNK_SIZE the rest of that category/Tt combination uses. (This also
+# generalizes cleanly what already held true by coincidence before: since
+# montoril's task count per Tt, 800, happens to be an exact multiple of
+# the old global CHUNK_SIZE=20, its chunks were already "pure" -- never
+# mixed with sir_laplace/sir_collapsed's "leve" tasks at the same Tt --
+# but that was incidental to task ordering + divisibility, not something
+# the grouping key itself guaranteed until now.)
+task_grid$chunk_index <- ave(seq_len(nrow(task_grid)),
+							  paste(task_grid$category, task_grid$Tt, task_grid$method),
+							  FUN = function(idx) ceiling(seq_along(idx) / task_grid$ncpus[idx[1]]))
+
+task_grid$chunk_id <- sprintf("%s_Tt%04d_%s_%03d", task_grid$category, task_grid$Tt, task_grid$method, task_grid$chunk_index)
 
 grid_size <- nrow(task_grid)
 
 # ---- Job-level grid (one row per chunk/PBS job) ----
-job_grid <- unique(task_grid[, c("chunk_id", "category", "Tt")])
+job_grid <- unique(task_grid[, c("chunk_id", "category", "Tt", "ncpus")])
 job_grid <- job_grid[order(job_grid$category, job_grid$Tt, job_grid$chunk_id), ]
 rownames(job_grid) <- NULL
 
@@ -260,6 +407,9 @@ run_task <- function(task) {
 	f <- task$f
 	method <- task$method
 	seed <- task$seed
+	N <- task$N
+	burnin <- task$burnin
+	K <- task$K
 
 	task_result_file <- task_result_filename(task)
 
@@ -618,7 +768,7 @@ if (run_mode == "local") {
 
 	reg <- makeRegistry(
 		file.dir = registry_dir,
-		source = "simulation.R",
+		source = "simulation_run.R",
 		seed = 1
 	)
 
@@ -642,38 +792,55 @@ if (run_mode == "local") {
 
 		ids <- batchMap(
 			fun = function(chunk_id) {
-				run_tasks(task_grid[task_grid$chunk_id == chunk_id, ], n_cores = CHUNK_SIZE)
+				chunk_tasks <- task_grid[task_grid$chunk_id == chunk_id, ]
+				run_tasks(chunk_tasks, n_cores = chunk_tasks$ncpus[1])
 			},
 			chunk_id = job_grid_to_submit$chunk_id,
 			reg = reg
 		)
 		# batchMap()'s returned ids has only a job.id column (not the mapped
 		# chunk_id) -- but job.id order matches the input vector's order
-		# exactly (confirmed empirically), so category can be attached
+		# exactly (confirmed empirically), so category/ncpus can be attached
 		# directly by position, no join needed.
 		ids$category <- job_grid_to_submit$category
+		ids$ncpus <- job_grid_to_submit$ncpus
 
-		for (cat in unique(job_grid_to_submit$category)) {
+		# max.concurrent.jobs = floor(160 / ncpus) varies now too, since
+		# ncpus is no longer a single global CHUNK_SIZE for every
+		# submission -- montoril/Tt=1600's chunks (ncpus=10) get a higher
+		# ceiling (16) than everything else (ncpus=20, ceiling 8), correctly
+		# reflecting that twice as many of the smaller jobs fit in the same
+		# 160-ncpus quota. Submission is grouped by (category, ncpus) pairs
+		# instead of category alone, since submitJobs() requires uniform
+		# resources within one call, and ncpus now varies WITHIN the "leve"
+		# category (montoril/Tt=1600 vs. everything else in "leve").
+		for (cat in unique(ids$category)) {
+			for (ncpus_val in unique(ids$ncpus[ids$category == cat])) {
 
-			cat_ids <- ids[ids$category == cat, "job.id", drop = FALSE]
+				grp_ids <- ids[ids$category == cat & ids$ncpus == ncpus_val, "job.id", drop = FALSE]
+				max_concurrent_grp <- 160 %/% ncpus_val
 
-			submitJobs(cat_ids,
-					   resources = list(ncpus = CHUNK_SIZE, walltime_hours = walltime_hours_for(cat),
-										 max.concurrent.jobs = 10),
-					   reg = reg)
+				submitJobs(grp_ids,
+						   resources = list(ncpus = ncpus_val, walltime_hours = walltime_hours_for(cat),
+											 max.concurrent.jobs = max_concurrent_grp),
+						   reg = reg)
 
-			printf("Submitted %d job(s) for category '%s'.", nrow(cat_ids), cat)
+				printf("Submitted %d job(s) for category '%s' (ncpus=%d, max.concurrent=%d).",
+					   nrow(grp_ids), cat, ncpus_val, max_concurrent_grp)
+			}
 		}
 
 		printf("Use check_progress.R to monitor (see /areas/euler-cluster-simulation.md).")
 		printf("NOTE: submitJobs() blocks (in THIS R session) until every requested job has")
-		printf("      been dispatched -- not until they finish. max.concurrent.jobs=10 is a")
-		printf("      real, global throttle (checked against the live scheduler via")
-		printf("      getBatchIds(), not a per-category counter), so submitting multiple")
-		printf("      categories in one run is safe -- the true 10-job cap is respected")
-		printf("      across all of them. But because this call can block for a long time")
-		printf("      (hours, for the larger categories), run this inside tmux/screen or")
-		printf("      with nohup, never directly in an SSH session that might disconnect.")
+		printf("      been dispatched -- not until they finish. max.concurrent.jobs is a real,")
+		printf("      global throttle (checked against the live scheduler via getBatchIds(),")
+		printf("      not a per-category counter) -- it varies by ncpus group now (160 %%/%% ncpus),")
+		printf("      160/20=8 for most chunks, 160/10=16 for montoril/Tt=1600's smaller ones --")
+		printf("      but the true per-group cap is respected regardless of how many (category,")
+		printf("      ncpus) groups are submitted in one run. This call can still block for a")
+		printf("      long time (hours, for the larger categories), so run this inside")
+		printf("      tmux/screen or with nohup, never directly in an SSH session that might")
+		printf("      disconnect.")
 	}
 
 } else {

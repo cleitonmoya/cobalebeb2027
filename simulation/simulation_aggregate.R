@@ -40,7 +40,7 @@ setwd(dirname(this.path::this.path()))
 # simulation.R) -- SIMULATION_DEFS_ONLY suppresses simulation.R's own
 # dispatch block (run_mode == "local"/"cluster"), same guard mechanism as
 # submit_simulation.R used earlier.
-source("simulation.R", local = FALSE)
+source("simulation_run.R", local = FALSE)
 # No rm(SIMULATION_DEFS_ONLY, ...) needed here: simulation.R's own
 # rm(list = setdiff(ls(), ".defs_only_flag")) at its top already destroys
 # it as a side effect of being sourced.
@@ -49,7 +49,7 @@ printf("Aggregating simulation results from: %s", path_results_partial)
 
 rds_files <- list.files(path_results_partial, pattern = "\\.rds$", full.names = TRUE)
 if (length(rds_files) == 0) {
-	stop(sprintf("No .rds files found in %s -- has simulation.R been run yet?", path_results_partial))
+	stop(sprintf("No .rds files found in %s -- has simulation_run.R been run yet?", path_results_partial))
 }
 printf("Found %d replica .rds file(s).", length(rds_files))
 

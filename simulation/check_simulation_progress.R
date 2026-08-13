@@ -1,4 +1,4 @@
-# simulation/check_progress.R
+# simulation/check_simulation_progress.R
 #
 # Read-only progress/health check for the production simulation run.
 # Safe to run anytime, as often as needed -- NEVER submits, modifies, or
@@ -32,7 +32,7 @@ rm(list = setdiff(ls(), "SIMULATION_DEFS_ONLY"))
 options(error = function() traceback(2))
 setwd(dirname(this.path::this.path()))
 
-source("simulation.R", local = FALSE)
+source("simulation_run.R", local = FALSE)
 
 printf("========================================")
 printf("Progress check: %s", format(Sys.time()))
@@ -78,42 +78,64 @@ if (!dir.exists("registry_simulation")) {
 
 	library(batchtools)
 
-	# loadRegistry() re-sources simulation.R internally (same mechanism as
-	# the initial source() above) -- but SIMULATION_DEFS_ONLY was already
-	# destroyed by simulation.R's own rm() the first time it ran, so it
-	# must be re-armed before EVERY loadRegistry() call, not just once at
-	# the top of this script (bug found in testing: without this wrapper,
-	# the second loadRegistry() call below re-triggered the full dispatch
-	# -- archiving/recreating the registry -- exactly the failure mode
-	# documented in /areas/euler-cluster-simulation.md).
-	safe_load_registry <- function(...) {
+	# ALL of this section's state (reg, expired_ids, still_expired,
+	# err_ids) is kept local to check_batchtools_status()'s own call
+	# frame, deliberately -- not because of any nesting preference, but
+	# because loadRegistry() re-sources simulation.R internally (same
+	# mechanism as the initial source() above), which runs
+	# rm(list = setdiff(ls(), ".defs_only_flag")) at its own top. That rm()
+	# wipes EVERYTHING in .GlobalEnv except that one flag -- confirmed in
+	# practice on calibration_run.R's identical pattern (see
+	# check_calibration_progress.R), on two different kinds of casualty:
+	#   1. A named helper function (an earlier version wrapped the
+	#      "assign flag + loadRegistry()" pattern in a `safe_load_registry()`
+	#      function -- wiped by its own FIRST call's internal re-source,
+	#      so the SECOND call site failed with "could not find function
+	#      'safe_load_registry'").
+	#   2. A plain variable (`expired_ids`, needed AFTER the second
+	#      loadRegistry() call for the re-check comparison, wiped the same
+	#      way -- "object 'expired_ids' not found" on the exact next line
+	#      that used it, even after fixing (1) by inlining instead of a
+	#      shared function).
+	# Both failures share one root cause: anything living in .GlobalEnv
+	# when loadRegistry() is called does not reliably survive the call.
+	# Wrapping the WHOLE section in a function sidesteps this entirely --
+	# reg/expired_ids/still_expired/err_ids then live in this function's
+	# own local execution frame (a child environment of .GlobalEnv,
+	# created fresh when the function is called), which the rm() (via
+	# sys.source(fn, envir = .GlobalEnv)) never touches. Verified directly
+	# (see check_calibration_progress.R's testing): a local variable
+	# inside a wrapping function survives an rm(list=ls()) that targets
+	# .GlobalEnv, even though an identically-named .GlobalEnv variable
+	# does not.
+	check_batchtools_status <- function() {
 		assign("SIMULATION_DEFS_ONLY", TRUE, envir = .GlobalEnv)
-		batchtools::loadRegistry(...)
-	}
+		reg <- loadRegistry("registry_simulation", writeable = FALSE)
+		print(getStatus(reg = reg))
 
-	reg <- safe_load_registry("registry_simulation", writeable = FALSE)
-	print(getStatus(reg = reg))
+		expired_ids <- findExpired(reg = reg)
+		if (nrow(expired_ids) > 0) {
+			printf("\n%d job(s) show 'Expired' -- re-checking after a short wait", nrow(expired_ids))
+			printf("(known NFS staleness false-positive; see /areas/euler-cluster-simulation.md)...")
+			Sys.sleep(10)
+			assign("SIMULATION_DEFS_ONLY", TRUE, envir = .GlobalEnv)
+			reg <- loadRegistry("registry_simulation", writeable = FALSE)  # re-sync
+			still_expired <- findExpired(ids = expired_ids, reg = reg)
+			if (nrow(still_expired) > 0) {
+				printf("Still %d 'Expired' after re-check -- worth a closer look (job.id: %s).",
+					   nrow(still_expired), paste(still_expired$job.id, collapse = ", "))
+			} else {
+				printf("Resolved after re-check -- was staleness, not a real problem.")
+			}
+		}
 
-	expired_ids <- findExpired(reg = reg)
-	if (nrow(expired_ids) > 0) {
-		printf("\n%d job(s) show 'Expired' -- re-checking after a short wait", nrow(expired_ids))
-		printf("(known NFS staleness false-positive; see /areas/euler-cluster-simulation.md)...")
-		Sys.sleep(10)
-		reg <- safe_load_registry("registry_simulation", writeable = FALSE)  # re-sync
-		still_expired <- findExpired(ids = expired_ids, reg = reg)
-		if (nrow(still_expired) > 0) {
-			printf("Still %d 'Expired' after re-check -- worth a closer look (job.id: %s).",
-				   nrow(still_expired), paste(still_expired$job.id, collapse = ", "))
-		} else {
-			printf("Resolved after re-check -- was staleness, not a real problem.")
+		err_ids <- findErrors(reg = reg)
+		if (nrow(err_ids) > 0) {
+			printf("\n%d job(s) with a REAL error (not staleness):", nrow(err_ids))
+			print(getErrorMessages(ids = err_ids, reg = reg))
 		}
 	}
-
-	err_ids <- findErrors(reg = reg)
-	if (nrow(err_ids) > 0) {
-		printf("\n%d job(s) with a REAL error (not staleness):", nrow(err_ids))
-		print(getErrorMessages(ids = err_ids, reg = reg))
-	}
+	check_batchtools_status()
 }
 
 printf("\n========================================")

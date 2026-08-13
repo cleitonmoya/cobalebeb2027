@@ -1,10 +1,15 @@
 #!/bin/bash
 #PBS -N <%= job.name %>
+# r1i2n2 has been unreliable on the calibration side (see
+# calibration_pbs.tmpl's comment for the full evidence) -- a select-level
+# exclusion was attempted there and rejected by qsub; no confirmed working
+# syntax yet, so it is NOT applied here either. Revisit once Euler support
+# confirms a working exclusion syntax or fixes/offlines the node.
 #PBS -l select=1:ncpus=<%= resources$ncpus %>
 #PBS -l place=excl
 #PBS -l walltime=<%= { total_min <- round(resources$walltime_hours * 60); sprintf("%02d:%02d:00", total_min %/% 60, total_min %% 60) } %>
 #PBS -j oe
-#PBS -o /dev/null
+#PBS -o <%= log.file %>
 
 # No -q directive: let RouteQ decide (Seq_short/Seq_long cap ncpus at 1,
 # so ncpus=20 can only be routed to Parallel_*). Every job was landing in
@@ -18,25 +23,24 @@
 # chunking is built around). This is why walltime_hours_for() in
 # simulation.R always returns a value above 6h now, for every category.
 
-# Redirect all output directly, from inside the script, to the same NFS
-# path batchtools expects the log at -- instead of relying on PBS's own
-# -o/-j oe stage-out mechanism. That mechanism (absolute, hostname-
-# qualified NFS path in Output_Path) delivered nothing during testing
-# (Exit_status=0, job ran and wrote its real results correctly, but
-# neither the PBS spool .OU file nor the batchtools log destination ever
-# received any content -- Stageout_status=1, exact meaning unconfirmed
-# even against the PBS Pro reference docs). Direct NFS writes from the
-# compute node are already proven reliable all session (every .rds result
-# file is written this same way), so this sidesteps PBS's separate
-# staging subsystem entirely instead of depending on it.
-exec > "<%= log.file %>" 2>&1
-
-echo "=== PBS job diagnostics ==="
-echo "PBS_JOBID:  $PBS_JOBID"
-echo "PBS_QUEUE:  $PBS_QUEUE"
-echo "hostname:   $(hostname)"
-echo "Submitted:  $(date)"
-echo "==========================="
+# REVERTED (was: exec > "<%= log.file %>" 2>&1, with #PBS -o /dev/null):
+# an earlier test reported the standard #PBS -o mechanism not delivering
+# log content, and worked around it with a manual exec redirect instead.
+# That manual redirect is the ONE difference between this template and
+# calibration_pbs.tmpl's finalization handling (calibration_pbs.tmpl uses
+# the standard #PBS -o <log.file> above, unchanged, and never showed this
+# problem) -- and it is also the prime suspect for a newly observed delay
+# specific to production: every job's tracejob shows a "Post job file
+# processing error" costing ~1-2 minutes between the real computation
+# finishing (Obit received) and the job actually exiting (Exit_status=0,
+# results already correctly written to disk either way -- this delay is
+# pure wall-clock overhead, not a correctness problem, but on ~85 batches
+# of 8 concurrent jobs it adds up to 1.5-3h of otherwise avoidable total
+# wall time). Reverting to the standard mechanism to test whether it both
+# resolves the delay AND still delivers the log -- if the original
+# no-log-content problem reproduces, this needs a different fix, not a
+# reversion to the manual exec redirect (which trades a log-delivery
+# problem for a wall-time-delay problem, not clearly a net improvement).
 
 source ~/setup_env.sh
 
