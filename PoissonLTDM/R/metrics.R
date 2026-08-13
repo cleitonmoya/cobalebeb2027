@@ -77,7 +77,7 @@
 # parameters, or a length-Tt vector for time-indexed parameters.
 metrics_convergence <- function(result_list, hist_name, burnin) {
 	arr <- .build_convergence_array(result_list, hist_name, burnin)
-	res <- rhat_ess_fast(arr)
+	res <- burhat_ess_fast(arr)
 	if (dim(arr)[3] == 1) {
 		list(rhat = res$rhat[1], ess_bulk = res$ess_bulk[1], ess_tail = res$ess_tail[1])
 	} else {
@@ -161,16 +161,15 @@ metrics_mae <- function(estimated, true) {
 
 
 # Credible interval (estimated) for theta1 and theta2
-metrics_theta1_ci <- function(theta_samples, alpha) {
-	ci_lower <- apply(theta_samples, 2, quantile, probs = alpha/2)
-	ci_upper <- apply(theta_samples, 2, quantile, probs = 1 - alpha/2)
-	return(list(ci_lower=ci_lower, ci_upper=ci_upper))
+metrics_theta_ci <- function(theta_samples, credMass) {
+	ci <- apply(theta_samples, 2, HDInterval::hdi, credMass = credMass)
+	return(list(ci_lower = ci["lower", ], ci_upper = ci["upper", ]))
 }
 
 
 # Credible interval (estimated) W1 and W2
 metrics_W_ci <- function(W_samples, alpha) {
-	ci_lower <- quantile(W_samples, probs = alpha/2)
-	ci_upper <- quantile(W_samples, probs = 1 - alpha/2)
+	ci_lower <- HDInterval::hdi(W_samples, credMass = alpha)[["lower"]]
+	ci_upper <- HDInterval::hdi(W_samples, credMass = alpha)[["upper"]]
 	return(list(ci_lower=ci_lower, ci_upper=ci_upper))
 } 

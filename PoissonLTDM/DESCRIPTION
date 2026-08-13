@@ -6,5 +6,5 @@ Maintainer: Cleiton Moya de Almeida <cleitonmoya@gmail.com>
 Description: Samplers and simulation code for the Poisson Local Trend Dynamic Model  
 License: MIT
 Encoding: UTF-8
-Imports: Matrix, rstan, Rcpp
+Imports: Matrix, HDInterval, rstan, Rcpp
 LinkingTo: Rcpp, RcppArmadillo

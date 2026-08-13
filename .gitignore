@@ -2,3 +2,4 @@ cache/
 backup/
 simulation/results
 simulation/pbs_script
+results/

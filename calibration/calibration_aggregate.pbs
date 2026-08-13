@@ -1,0 +1,69 @@
+#!/bin/bash
+## Standalone PBS job for calibration_aggregate.R -- NOT part of the
+## batchtools/registry_calibration machinery (aggregation is a single
+## sequential pass over every task's .rds, no chunking/parallelism needed),
+## so this is submitted directly with plain qsub, no R/batchtools glue.
+##
+## Queue choice: Parallel (ncpus=18, place=excl), NOT the Seq_long/Fat Node
+## pool -- considered and rejected. Two facts settle it:
+##   1. Seq_long/Seq_short cap ncpus at 1 (confirmed via
+##      `qstat -Qf Seq_long | grep resources_max`: resources_max.ncpus = 1).
+##      metrics.R's rhat_ess_fast() (Rcpp + RcppArmadillo + FFTW3 + OpenMP,
+##      see src/convergence.cpp) defaults to n_threads=0, which resolves to
+##      omp_get_max_threads() -- correctly respecting whatever cpuset PBS
+##      actually grants, so it would silently run single-threaded on a
+##      Fat Node job, not error -- but that defeats the entire point of
+##      having ported rhat/ESS to a parallel C++ implementation in the
+##      first place (it existed specifically because the R-level
+##      posterior::summarise_draws() loop over Tt=1600 variables took
+##      90-100+ seconds per metric -- see metrics.R's own header comment).
+##   2. The Fat Node's 512GB is not actually needed: the N=520000 addition
+##      raises the estimated peak to ~60-80GB (raw 3-chain history for the
+##      Tt=1600 task ~40GB, plus ~18GB per diagnostics array if theta1/
+##      theta2 are both live at once) -- comfortably under the Parallel
+##      queue's 125GB, which already proved sufficient for the previous
+##      (lighter) grid: 59GB peak was observed there via `free -h` in an
+##      earlier run of this exact job.
+## Net: staying on Parallel keeps real OpenMP parallelism for
+## rhat_ess_fast() AND has adequate memory headroom -- no need to trade
+## one for the other.
+##
+## walltime > 6h for the same reason as calibration_pbs.tmpl: routes to
+## "fila paralela longa" (more nodes available there) rather than "fila
+## curta" -- not strictly needed for a single one-off job the way it
+## matters for 14 concurrent chunks, but there's no downside to keeping it
+## consistent, and it avoids the short queue's node scarcity if the
+## cluster happens to be busy when this is submitted.
+##
+## -k oe: without this, PBS buffers stdout/stderr on the execution node
+## and only copies the final -o file back to this directory when the job
+## COMPLETES -- meaning "tail -f calibration_aggregate.log" (or even just
+## checking the file exists) shows NOTHING while the job is still running,
+## which looks identical to a stuck/crashed job from the outside. -k oe
+## makes PBS write the output incrementally instead, so it's actually
+## useful for monitoring a long-running job like this one.
+##
+## No -q directive, no host exclusion -- same reasoning as
+## calibration_pbs.tmpl (let RouteQ pick the queue; no working node-
+## exclusion syntax exists for r1i2n2 in this PBS Pro version).
+
+#PBS -N calibration_aggregate
+#PBS -j oe
+#PBS -k oe
+#PBS -o calibration_aggregate.log
+#PBS -l select=1:ncpus=18
+#PBS -l place=excl
+#PBS -l walltime=06:30:00
+
+source ~/setup_env.sh
+cd ~/cobalebeb2027/simulation/
+
+echo "===================================================="
+echo "PBS job ID:      $PBS_JOBID"
+echo "Node (hostname): $(hostname)"
+echo "Total RAM on this node:"
+free -h
+echo "===================================================="
+echo
+
+Rscript calibration_aggregate.R

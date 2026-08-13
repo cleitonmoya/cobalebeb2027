@@ -388,14 +388,21 @@ print_and_plot_diagnostics <- function(result_list, y, changepoints,
             abline(v = burnin, col = "red")
         }
         
-        if (!is.null(result$ac_hist) && !is.null(ac_ref)) { # amh_montoril
+        if (!is.null(result$ac_hist) && !is.null(ac_ref)) { # amh_montoril (matrix) / stan (vector)
             roll_mean <- function(v, k) {
                 n <- length(v); out <- rep(NA, n)
                 for (i in k:n) out[i] <- mean(v[(i - k + 1):i])
                 out
             }
+            # amh_montoril's ac_hist is an N x Tt matrix (one MH acceptance
+            # rate per (iteration, t) -- rowMeans() gives the mean over t
+            # per iteration. stan's ac_hist (accept_stat__) is already a
+            # length-N vector, one value per iteration -- nothing to
+            # average over, plot it directly. Same is.null(dim(...))
+            # distinction already used for the console printout above.
+            ac_series <- if (is.null(dim(result$ac_hist))) result$ac_hist else rowMeans(result$ac_hist)
             par(mfrow = c(1, 1), mar = c(4, 4, 2, 2), cex = 0.8)
-            plot(rowMeans(result$ac_hist), type = "l", xlab = "n", ylab = "ratio",
+            plot(ac_series, type = "l", xlab = "n", ylab = "ratio",
                  main = expression("Acceptance ratio of " * theta[t * 1] * " (mean over t)"))
             abline(h = ac_ref, col = "blue", lty = 2)
             abline(v = burnin, col = "red")

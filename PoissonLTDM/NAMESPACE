@@ -14,4 +14,5 @@ export(metrics_ess_single_chain)     # metrics.R
 export(metrics_loglik)       	     # metrics.R
 export(metrics_rmse)         	     # metrics.R
 export(metrics_mae)          	     # metrics.R
-export(metrics_theta1_ci)     	     # metrics.R
+export(metrics_theta_ci)     	     # metrics.R
+export(metrics_W_ci)     	     # metrics.R
