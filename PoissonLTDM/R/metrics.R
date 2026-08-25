@@ -77,7 +77,7 @@
 # parameters, or a length-Tt vector for time-indexed parameters.
 metrics_convergence <- function(result_list, hist_name, burnin) {
 	arr <- .build_convergence_array(result_list, hist_name, burnin)
-	res <- burhat_ess_fast(arr)
+	res <- rhat_ess_fast(arr)
 	if (dim(arr)[3] == 1) {
 		list(rhat = res$rhat[1], ess_bulk = res$ess_bulk[1], ess_tail = res$ess_tail[1])
 	} else {
@@ -157,6 +157,77 @@ metrics_rmse <- function(estimated, true) {
 # Mean absolute error (MAE)
 metrics_mae <- function(estimated, true) {
 	mean(abs(estimated - true))
+}
+
+
+# ---- ESS per second, given a total compute time (Eq. 31, metricas_theta1.tex) ----
+#
+# Generic efficiency helper: divides an ESS value (bulk or tail, scalar or
+# length-Tt vector) by a total compute time. Used by the real-data
+# application (application/real_data_run.R), where "total_time" is the SUM
+# of the K chains' elapsed times (not wall time, since the K chains run in
+# parallel) -- this differs from the simulation study's single-chain ESS/s
+# (run_task()), which divides by one chain's own elapsed time directly
+# without going through this helper. Kept as a separate function (rather
+# than inlining the division at each call site) so the "sum of chain
+# times, not wall time" convention lives in one documented place.
+metrics_ess_per_sec <- function(ess, total_time) {
+	ess / total_time
+}
+
+
+# ---- Maximum pairwise disagreement between methods' posterior means
+# (Eq. 32, metricas_theta1.tex) ----
+#
+# Cross-method consistency check for the real-data application, where no
+# theta1_true is available to assess accuracy directly: checks whether all
+# methods are sampling the same target posterior. NOT an accuracy metric.
+#
+# theta_means: named list, one element per method, each a length-Tt vector
+#   of posterior means (theta1 or theta2) pooled across that method's K
+#   chains.
+#
+# Returns a length-Tt vector, Delta_max(t) = max_{m != m'} |theta_hat_m(t) - theta_hat_m'(t)|,
+# computed as max(t) - min(t) across methods at each t (equivalent to the
+# max pairwise absolute difference for real-valued inputs).
+metrics_agreement_max <- function(theta_means) {
+	if (length(theta_means) < 2) {
+		stop("metrics_agreement_max() needs at least 2 methods.")
+	}
+	mat <- do.call(cbind, theta_means)  # Tt x n_methods
+	apply(mat, 1, function(row) max(row) - min(row))
+}
+
+
+# ---- Log conditional predictive ordinate (log-CPO), harmonic-mean
+# estimator (Eq. 34, metricas_theta1.tex) ----
+#
+# Cross-validated (leave-one-out) predictive fit for the real-data
+# application, following Aktekin, Soyer & Xu (2013, Eq. 36) and Gelfand
+# (1996). Computed directly from the pooled post-burn-in posterior draws
+# already available -- no refitting or additional resampling needed.
+#
+# y: observed count series, length Tt.
+# lambda_samples: S x Tt matrix of posterior draws of lambda_t =
+#   exp(theta1_t), pooled across a method's K chains (S = total
+#   post-burn-in draws summed over the K chains).
+#
+# Returns a list with cpo (length-Tt vector of f_hat(y_t | y_(-t))) and
+# log_cpo (scalar, sum of log(cpo)).
+#
+# NOTE: the harmonic-mean estimator is known to have potentially high (even
+# infinite) variance (Kass & Raftery, 1995) -- report log_cpo alongside
+# metrics_loglik(), never in isolation (see "Ajuste ao dado observado",
+# metricas_theta1.tex).
+metrics_log_cpo <- function(y, lambda_samples) {
+	Tt <- length(y)
+	if (ncol(lambda_samples) != Tt) {
+		stop("lambda_samples must have one column per time point (ncol == length(y)).")
+	}
+	cpo <- vapply(seq_len(Tt), function(t) {
+		1 / mean(1 / dpois(y[t], lambda_samples[, t]))
+	}, numeric(1))
+	list(cpo = cpo, log_cpo = sum(log(cpo)))
 }
 
 

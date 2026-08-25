@@ -49,7 +49,7 @@ printf("Aggregating simulation results from: %s", path_results_partial)
 
 rds_files <- list.files(path_results_partial, pattern = "\\.rds$", full.names = TRUE)
 if (length(rds_files) == 0) {
-	stop(sprintf("No .rds files found in %s -- has simulation_run.R been run yet?", path_results_partial))
+	stop(sprintf("No .rds files found in %s", path_results_partial))
 }
 printf("Found %d replica .rds file(s).", length(rds_files))
 
@@ -152,10 +152,6 @@ for (i in seq_len(nrow(cells))) {
 		coverage_wilson_lower = coverage_wilson_lower,
 		coverage_wilson_upper = coverage_wilson_upper,
 		width_mean = width_mean_agg,
-		ess_sec_theta1_mean = mean(cell_rows$ess_sec_theta1_mean),
-		ess_sec_theta1_sd = sd(cell_rows$ess_sec_theta1_mean),
-		ess_sec_theta_01_mean = mean(cell_rows$ess_sec_theta_01),
-		elapsed_time_mean = mean(cell_rows$elapsed_time),
 		stringsAsFactors = FALSE
 	)
 }

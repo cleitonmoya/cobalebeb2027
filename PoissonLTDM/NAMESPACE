@@ -16,3 +16,6 @@ export(metrics_rmse)         	     # metrics.R
 export(metrics_mae)          	     # metrics.R
 export(metrics_theta_ci)     	     # metrics.R
 export(metrics_W_ci)     	     # metrics.R
+export(metrics_ess_per_sec)  	     # metrics.R
+export(metrics_agreement_max)	     # metrics.R
+export(metrics_log_cpo)      	     # metrics.R

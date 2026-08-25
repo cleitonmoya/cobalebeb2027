@@ -589,8 +589,6 @@ run_task <- function(task) {
 		# a scalar rate per replica -- Bug 3's fix: keeping the raw
 		# length-Tt ci_lower/ci_upper vectors directly as data.frame()
 		# columns silently recycled every other (scalar) column to Tt rows.
-		# No theta2 equivalent: no theta2_true exists to check coverage
-		# against (see planning discussion).
 		coverage_rate_theta1 <- mean(theta1_true >= theta1_ci_lower & theta1_true <= theta1_ci_upper)
 		theta1_ci_width_mean <- mean(theta1_ci_upper - theta1_ci_lower)
 
