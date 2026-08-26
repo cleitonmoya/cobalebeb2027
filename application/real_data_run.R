@@ -356,6 +356,16 @@ aggregate_method <- function(method_chains) {
 	# of Eq. 31.
 	total_time <- sum(vapply(method_chains, function(ch) ch$elapsed_time, numeric(1)))
 
+	# Per-chain CPU time -- K_chains independent replicate timings (distinct
+	# seeds/inits, same N/burnin per method), giving mean and SE for the
+	# cross-method CPU-time comparison against the tscount literature
+	# benchmarks (see chat discussion). CAVEAT: with K_chains=3 (2 d.f.), the
+	# Student-t multiplier for a 95% CI is t_{0.975,2}~4.30, not the usual
+	# 1.96 -- report accordingly, do not treat this SE as if K were large.
+	chain_times     <- vapply(method_chains, function(ch) ch$elapsed_time, numeric(1))
+	total_time_mean <- mean(chain_times)
+	total_time_se   <- sd(chain_times) / sqrt(length(chain_times))
+
 	# ESS/s -- BOTH bulk and tail, for every parameter (the point flagged at
 	# the top of this script: simulation_run.R only stored bulk).
 	ess_sec <- function(conv) list(bulk = metrics_ess_per_sec(conv$ess_bulk, total_time),
@@ -392,6 +402,7 @@ aggregate_method <- function(method_chains) {
 
 	list(
 		method = method, total_time = total_time,
+		total_time_mean = total_time_mean, total_time_se = total_time_se,
 
 		rhat_theta_01 = conv_theta_01$rhat, rhat_theta_02 = conv_theta_02$rhat,
 		rhat_W1 = conv_W1$rhat, rhat_W2 = conv_W2$rhat,
@@ -476,6 +487,7 @@ if (!.defs_only_flag) {
 		summary_df <- do.call(rbind, lapply(method_summaries, function(s) {
 			data.frame(
 				method = s$method, total_time = s$total_time,
+				total_time_mean = s$total_time_mean, total_time_se = s$total_time_se,
 
 				rhat_theta1_max = s$rhat_theta1_max, rhat_theta2_max = s$rhat_theta2_max,
 

@@ -114,10 +114,10 @@ theme_paper <- function(base_size = BASE_FONT_SIZE) {
 	theme_minimal(base_size = base_size) +
 		theme(
 			panel.grid.minor = element_blank(),
-			panel.grid.major = element_line(color = "grey88", linewidth = 0.3),
+			panel.grid.major = element_line(color = "grey70", linewidth = 0.15),
 			panel.border = element_rect(color = "black", fill = NA, linewidth = 0.4),
 			strip.text = element_text(face = "bold", size = rel(0.95)),
-			strip.background = element_rect(fill = "grey93", color = NA),
+			strip.background = element_blank(),
 			axis.title = element_text(size = rel(1.0)),
 			axis.text = element_text(size = rel(0.85), color = "black"),
 			legend.position = "bottom",
@@ -127,6 +127,44 @@ theme_paper <- function(base_size = BASE_FONT_SIZE) {
 			plot.title = element_blank(),
 			plot.margin = margin(4, 6, 4, 4)
 		)
+}
+
+# pch 18 (solid diamond, used for sir_collapsed) renders visually smaller
+# than the other pch shapes at the same "size" value -- bump it up so all
+# five method markers read as similar visual weight (mirrors figures_simulation.R).
+METHOD_POINT_SIZES <- c(
+	montoril = 1.6,
+	pg_apf = 1.6,
+	sir_laplace = 1.6,
+	sir_collapsed = 2.2,
+	stan = 1.6
+)
+
+# Theoretical ceiling on raw (bulk) ESS: S_total = S_per_chain * K_chains.
+# The real-data application runs K = 3 chains per method (unlike the
+# simulation study's K = 1 -- see ESS_CEILING_SIM in figures_simulation.R),
+# per the calibration table:
+#   amh_montoril: S = 100,000 * K = 3 -> 300,000
+#   pg_apf: S = 20,000 * K = 3 -> 60,000
+#   sir_laplace / sir_collapsed / stan: S = 10,000 * K = 3 -> 30,000
+ESS_CEILING_REAL <- c(
+	montoril = 300000,
+	pg_apf = 60000,
+	sir_laplace = 30000,
+	sir_collapsed = 30000,
+	stan = 30000
+)
+
+# Proper log-scale minor gridlines (2,3,4,...,9 within each decade -- the
+# MATLAB-style log grid), instead of ggplot's default minor_breaks for a log
+# scale, which is just the arithmetic midpoint (in log space) between two
+# major breaks -- a single, visually meaningless line splitting each decade
+# in half (duplicated verbatim from figures_simulation.R -- see header note).
+log_minor_breaks <- function(x) {
+	lo <- floor(log10(min(x)))
+	hi <- ceiling(log10(max(x)))
+	breaks <- as.vector(outer(2:9, 10^(lo:hi)))
+	return(breaks[breaks >= min(x) & breaks <= max(x)])
 }
 
 scale_color_method <- function() {
@@ -350,7 +388,7 @@ make_fig_article_real_fit <- function(fit, representative = ARTICLE_REPRESENTATI
 # line per method), mirroring make_fig_overlay_hpd() from figures.R -- test
 # variant against the single-representative-method version above. ----
 
-make_fig_article_real_fit_overlay <- function(fit, methods = METHOD_LEVELS) {
+make_fig_article_real_fit_overlay <- function(fit, methods = METHOD_LEVELS, font_size = 7) {
 	plot_data <- fit %>% filter(method %in% methods)
 	obs_data <- plot_data %>% filter(method == methods[1]) %>% select(date, y)
 
@@ -358,7 +396,7 @@ make_fig_article_real_fit_overlay <- function(fit, methods = METHOD_LEVELS) {
 		geom_col(
 			data = obs_data,
 			aes(x = date, y = y),
-			fill = "grey80", width = 28, alpha = 0.7
+			fill = "grey55", width = 28, alpha = 0.7
 		) +
 		geom_ribbon(
 			data = plot_data,
@@ -374,9 +412,18 @@ make_fig_article_real_fit_overlay <- function(fit, methods = METHOD_LEVELS) {
 		scale_fill_method() +
 		scale_linetype_method() +
 		scale_x_date(date_breaks = "1 year", date_labels = "%Y") +
+		scale_y_continuous(limits = c(0, 60), breaks = c(0, 20, 40, 60), expand = expansion(mult = c(0, 0))) +
 		labs(x = NULL, y = expression(y[t]~"and"~hat(lambda)[t])) +
 		theme_paper() +
-		theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+		theme(
+			text = element_text(size = font_size),
+			axis.text.x = element_text(angle = 0, hjust = 0.5),
+			legend.margin = margin(0, 0, 0, 0),
+			legend.box.margin = margin(0, 0, 0, 0),
+			legend.box.spacing = unit(2, "pt"),
+			legend.spacing.x = unit(4, "pt"),
+			legend.key.size = unit(0.7, "lines")
+		) +
 		guides(
 			color = guide_legend(nrow = 1, byrow = TRUE),
 			fill = guide_legend(nrow = 1, byrow = TRUE),
@@ -518,36 +565,200 @@ make_fig_real_fit_metrics <- function(summary_df, floor_pad = 0.15) {
 }
 
 
-# ---- Figure 9 (article): raw ESS + ESS/s, theta_t1/theta_t2/W1/W2 ---------
-
-make_fig_article_real_ess <- function(ess_raw, ess_sec, params = c("theta_t1", "theta_t2", "W1", "W2")) {
-	plot_data_raw <- ess_raw %>% filter(parameter %in% params) %>% mutate(parameter = factor(parameter, levels = params))
-	plot_data_sec <- ess_sec %>% filter(parameter %in% params) %>% mutate(parameter = factor(parameter, levels = params))
-
-	p_raw <- make_fig_real_ess_style_bar(plot_data_raw, y_label = "ESS", facet_nrow = 1, facet_ncol = 4) +
-		theme(legend.position = "none")
-	p_sec_full <- make_fig_real_ess_style_bar(plot_data_sec, y_label = "ESS/s", facet_nrow = 1, facet_ncol = 4)
-
-	legend <- extract_legend(p_sec_full)
-	p_sec <- p_sec_full + theme(legend.position = "none")
-
-	combined <- arrangeGrob(
-		p_raw, p_sec, legend,
-		ncol = 1,
-		heights = unit.c(unit(1, "null"), unit(1, "null"), grobHeight(legend) + unit(4, "pt"))
-	)
-
-	return(combined)
-}
-
-
-# ---- Shared helper: pull the legend grob out of a ggplot (duplicated
-# verbatim from figures.R) ----------------------------------------------
+# ---- Shared helper: pull the legend grob out of a ggplot, and stack several
+# plots into ONE gtable with truly equal panel sizes -------------------------
+#
+# gridExtra::arrangeGrob(heights = ...) treats each plot as an opaque box and
+# splits total height by the given weights -- since rows with less axis/strip
+# overhead (e.g. a blanked x-axis) end up with a visibly BIGGER panel than
+# rows with more overhead for the same weight, matching panel sizes required
+# fragile trial-and-error weight ratios. gtable::gtable_rbind() instead merges
+# the plots' gtables at the grid level, so each plot's "panel" row keeps its
+# default 1-null sizing -- when the combined gtable is finally drawn, all
+# panel rows compete equally for the same leftover space and end up exactly
+# the same height, regardless of how much fixed-size axis/strip content
+# surrounds them.
 
 extract_legend <- function(p) {
 	g <- ggplotGrob(p)
 	idx <- which(sapply(g$grobs, function(x) x$name) == "guide-box")
 	return(g$grobs[[idx]])
+}
+
+stack_plots_equal_panels <- function(plots, legend = NULL, legend_gap_pt = 0) {
+	grobs <- lapply(plots, ggplotGrob)
+
+	max_widths <- grobs[[1]]$widths
+	for (g in grobs[-1]) {
+		max_widths <- grid::unit.pmax(max_widths, g$widths)
+	}
+	for (i in seq_along(grobs)) {
+		grobs[[i]]$widths <- max_widths
+	}
+
+	combined <- grobs[[1]]
+	for (g in grobs[-1]) {
+		combined <- rbind(combined, g)
+	}
+
+	if (!is.null(legend)) {
+		combined <- gtable::gtable_add_rows(combined, heights = grobHeight(legend) + unit(legend_gap_pt, "pt"))
+		combined <- gtable::gtable_add_grob(combined, legend, t = nrow(combined), l = 1, r = ncol(combined))
+	}
+
+	return(combined)
+}
+
+# ---- Shared helper: ESS-style point chart (bulk + tail), facet by parameter
+#
+# Point, not bar: a single value per (method, parameter, estimator) doesn't
+# need geom_col's visual weight (fill + border) -- a colored/shaped point
+# per method reads just as clearly and far less cluttered, especially once
+# bulk and tail are both shown (distinguished by alpha, dodged apart).
+
+make_fig_real_ess_style_point <- function(plot_data, y_label, breaks_pow10, facet_nrow = 1, facet_ncol = 4, free_y = FALSE, limits = c(NA, NA)) {
+	p <- ggplot(plot_data, aes(x = method, y = value, color = method, shape = method, size = method, alpha = estimator, group = estimator)) +
+		geom_point(position = position_dodge(width = 0.5)) +
+		facet_wrap(
+			~parameter,
+			nrow = facet_nrow,
+			ncol = facet_ncol,
+			scales = if (free_y) "free_y" else "fixed",
+			labeller = as_labeller(PARAM_LABELS, label_parsed)
+		) +
+		scale_color_method() +
+		scale_shape_method() +
+		scale_size_manual(values = METHOD_POINT_SIZES, breaks = METHOD_LEVELS, guide = "none") +
+		scale_alpha_manual(values = c(bulk = 1, tail = 0.45), labels = c(bulk = "Bulk", tail = "Tail")) +
+		scale_x_discrete(labels = METHOD_LABELS) +
+		scale_y_log10(
+			breaks = 10^breaks_pow10,
+			minor_breaks = log_minor_breaks,
+			labels = label_number(big.mark = ",", drop0trailing = TRUE),
+			limits = limits
+		) +
+		labs(x = NULL, y = y_label) +
+		theme_paper() +
+		theme(axis.text.x = element_text(angle = 40, hjust = 1, vjust = 1)) +
+		guides(
+			color = guide_legend(nrow = 1, override.aes = list(size = unname(METHOD_POINT_SIZES[METHOD_LEVELS]))),
+			shape = guide_legend(nrow = 1, override.aes = list(size = unname(METHOD_POINT_SIZES[METHOD_LEVELS]))),
+			alpha = guide_legend(title = NULL, override.aes = list(color = "grey30", shape = 16, size = 1.6))
+		)
+
+	return(p)
+}
+
+
+# ---- Figure 9 (article): raw ESS + ESS/s, theta_t1/theta_t2/W1/W2 ---------
+
+make_fig_article_real_ess <- function(
+	ess_raw, ess_sec,
+	params = c("theta_t1", "theta_t2", "W1", "W2"),
+	panel_spacing_pt = 2,
+	row_margin = margin(1, 6, 1, 4),
+	legend_gap_pt = 0,
+	font_size = 7
+) {
+	facet_ncol <- length(params)
+	shrink_text <- theme(text = element_text(size = font_size))
+	minor_grid <- theme(panel.grid.minor = element_line(color = "grey80", linewidth = 0.12, linetype = "dashed"))
+
+	plot_data_raw <- ess_raw %>% filter(parameter %in% params) %>% mutate(parameter = factor(parameter, levels = params))
+	plot_data_sec <- ess_sec %>% filter(parameter %in% params) %>% mutate(parameter = factor(parameter, levels = params))
+
+	# Theoretical ceiling on raw ESS (S_total = S_per_chain * K_chains,
+	# K = 3 here), one horizontal dashed segment per method, centered on
+	# that method's x category (spans most of its width; not dodged by
+	# estimator -- the ceiling applies to bulk and tail alike).
+	ceiling_data <- data.frame(method = factor(METHOD_LEVELS, levels = METHOD_LEVELS)) %>%
+		mutate(method_index = as.numeric(method), ceiling = ESS_CEILING_REAL[as.character(method)])
+
+	# Row 1 (raw ESS) and row 2 (ESS/s) share the same x variable (method),
+	# so row 1's x-axis text/ticks/title are dropped -- row 2's are enough.
+	# Both rows use one shared (non-free) y-axis across all 4 parameters, so
+	# ggplot only draws y-axis text on the leftmost column.
+	p_raw <- make_fig_real_ess_style_point(plot_data_raw, y_label = "ESS", breaks_pow10 = 2:6, facet_nrow = 1, facet_ncol = facet_ncol) +
+		geom_segment(
+			data = ceiling_data,
+			aes(x = method_index - 0.35, xend = method_index + 0.35, y = ceiling, yend = ceiling),
+			inherit.aes = FALSE,
+			linetype = "dashed",
+			color = "grey30",
+			linewidth = 0.4
+		) +
+		shrink_text +
+		minor_grid +
+		theme(
+			legend.position = "none",
+			panel.spacing = unit(panel_spacing_pt, "pt"),
+			plot.margin = row_margin,
+			axis.text.x = element_blank(),
+			axis.ticks.x = element_blank(),
+			axis.title.x = element_blank()
+		)
+
+	# Row 2 skips its own facet strip titles -- row 1's, directly above,
+	# already name each parameter.
+	p_sec_full <- make_fig_real_ess_style_point(plot_data_sec, y_label = "ESS/s", breaks_pow10 = 0:4, facet_nrow = 1, facet_ncol = facet_ncol, limits = c(1, NA)) +
+		shrink_text +
+		minor_grid +
+		theme(
+			panel.spacing = unit(panel_spacing_pt, "pt"),
+			plot.margin = row_margin,
+			strip.text = element_blank(),
+			strip.background = element_blank(),
+			axis.title.x = element_blank(),
+			legend.margin = margin(0, 0, 0, 0),
+			legend.box.margin = margin(0, 0, 0, 0),
+			legend.box.spacing = unit(2, "pt"),
+			legend.spacing.x = unit(4, "pt"),
+			legend.key.size = unit(0.7, "lines")
+		)
+	p_sec <- p_sec_full + theme(legend.position = "none")
+
+	# Shared bottom legend: built from synthetic dummy data (decoupled from
+	# the real panels) so a "Theoretical max" key -- same grey dashed style
+	# as the ceiling segments in row 1 -- can be appended after the method
+	# keys. Methods get a "blank" linetype (they have no line in the real
+	# plot, only points); the Bulk/Tail alpha legend is reproduced
+	# separately since it isn't tied to method identity.
+	legend_data_method <- data.frame(x = 1, y = 1, method = factor(c(METHOD_LEVELS, "max_ess"), levels = c(METHOD_LEVELS, "max_ess")))
+	legend_data_estimator <- data.frame(x = 1, y = 1, estimator = factor(c("bulk", "tail"), levels = c("bulk", "tail")))
+
+	legend_plot <- ggplot() +
+		geom_line(data = legend_data_method, aes(x = x, y = y, color = method, linetype = method)) +
+		geom_point(data = legend_data_method, aes(x = x, y = y, color = method, shape = method, size = method)) +
+		geom_point(data = legend_data_estimator, aes(x = x, y = y, alpha = estimator), color = "grey30", shape = 16, size = 1.6) +
+		scale_color_manual(values = c(METHOD_COLORS, max_ess = "grey30"), labels = c(METHOD_LABELS, max_ess = "Theoretical max"), breaks = c(METHOD_LEVELS, "max_ess")) +
+		scale_shape_manual(values = c(METHOD_SHAPES, max_ess = NA), labels = c(METHOD_LABELS, max_ess = "Theoretical max"), breaks = c(METHOD_LEVELS, "max_ess")) +
+		scale_linetype_manual(
+			values = c(setNames(rep("blank", length(METHOD_LEVELS)), METHOD_LEVELS), max_ess = "dashed"),
+			labels = c(METHOD_LABELS, max_ess = "Theoretical max"),
+			breaks = c(METHOD_LEVELS, "max_ess")
+		) +
+		scale_size_manual(values = c(METHOD_POINT_SIZES, max_ess = 1.6), guide = "none") +
+		scale_alpha_manual(values = c(bulk = 1, tail = 0.45), labels = c(bulk = "Bulk", tail = "Tail")) +
+		theme_paper() +
+		shrink_text +
+		theme(
+			legend.margin = margin(0, 0, 0, 0),
+			legend.box.margin = margin(0, 0, 0, 0),
+			legend.box.spacing = unit(2, "pt"),
+			legend.spacing.x = unit(4, "pt"),
+			legend.key.size = unit(0.7, "lines")
+		) +
+		guides(
+			color = guide_legend(nrow = 1, override.aes = list(size = unname(c(METHOD_POINT_SIZES[METHOD_LEVELS], max_ess = 1.6)))),
+			shape = guide_legend(nrow = 1, override.aes = list(size = unname(c(METHOD_POINT_SIZES[METHOD_LEVELS], max_ess = 1.6)))),
+			linetype = guide_legend(nrow = 1),
+			alpha = guide_legend(title = NULL, override.aes = list(color = "grey30", shape = 16, size = 1.6))
+		)
+	legend <- extract_legend(legend_plot)
+
+	combined <- stack_plots_equal_panels(list(p_raw, p_sec), legend = legend, legend_gap_pt = legend_gap_pt)
+
+	return(combined)
 }
 
 
@@ -652,13 +863,13 @@ save_figure(
 save_figure(
 	plot = make_fig_article_real_fit_overlay(data$fit),
 	filename = "article_real_data_fit.pdf",
-	height = 3.8
+	height = 1.8
 )
 
 save_figure(
 	plot = make_fig_article_real_ess(data$ess_raw, data$ess_sec),
 	filename = "article_real_data_ess.pdf",
-	height = 4.6
+	height = 2.8
 )
 
 write_real_data_results_table(data$summary, data$delta_max_W1, data$delta_max_W2, data$delta_max)

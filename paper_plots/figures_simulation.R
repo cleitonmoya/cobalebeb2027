@@ -99,10 +99,10 @@ theme_paper <- function(base_size = BASE_FONT_SIZE) {
 	theme_minimal(base_size = base_size) +
 		theme(
 			panel.grid.minor = element_blank(),
-			panel.grid.major = element_line(color = "grey88", linewidth = 0.3),
+			panel.grid.major = element_line(color = "grey70", linewidth = 0.15),
 			panel.border = element_rect(color = "black", fill = NA, linewidth = 0.4),
 			strip.text = element_text(face = "bold", size = rel(0.95)),
-			strip.background = element_rect(fill = "grey93", color = NA),
+			strip.background = element_blank(),
 			axis.title = element_text(size = rel(1.0)),
 			axis.text = element_text(size = rel(0.85), color = "black"),
 			legend.position = "bottom",
@@ -220,9 +220,8 @@ make_fig_coverage <- function(aggregated, functions = FUNCTION_LEVELS, facet_nro
 			linewidth = 0.35
 		) +
 		geom_point(
-			aes(shape = method),
-			position = position_dodge(width = 0.6),
-			size = 1.6
+			aes(shape = method, size = method),
+			position = position_dodge(width = 0.6)
 		) +
 		#geom_line(
 		#	aes(x = as.integer(Tt_factor), linetype = method),
@@ -233,11 +232,12 @@ make_fig_coverage <- function(aggregated, functions = FUNCTION_LEVELS, facet_nro
 		scale_color_method() +
 		scale_shape_method() +
 		scale_linetype_method() +
+		scale_size_manual(values = METHOD_POINT_SIZES, breaks = METHOD_LEVELS, guide = "none") +
 		labs(x = "T", y = expression(Empirical~95*"%"~coverage~of~theta[1])) +
 		theme_paper() +
 		guides(
-			color = guide_legend(nrow = 1),
-			shape = guide_legend(nrow = 1),
+			color = guide_legend(nrow = 1, override.aes = list(size = unname(METHOD_POINT_SIZES[METHOD_LEVELS]))),
+			shape = guide_legend(nrow = 1, override.aes = list(size = unname(METHOD_POINT_SIZES[METHOD_LEVELS]))),
 			linetype = guide_legend(nrow = 1)
 		)
 
@@ -260,30 +260,39 @@ load_true_curve <- function(Tt_selected, replica = 1) {
 }
 
 make_fig_overlay_hpd <- function(by_t, Tt_selected = 1600, facet_nrow = 2, facet_ncol = 2) {
+	# Show lambda_t = exp(theta_t1) instead of theta_t1 -- exp() is monotonic,
+	# so the HPD band bounds transform validly by just exponentiating them
+	# too (no need to recompute the interval on the lambda scale).
 	plot_data <- by_t %>%
-		filter(Tt == Tt_selected)
+		filter(Tt == Tt_selected) %>%
+		mutate(
+			lambda_mean = exp(post_mean_agg),
+			lambda_lower = exp(band_lower),
+			lambda_upper = exp(band_upper)
+		)
 
-	true_curve <- load_true_curve(Tt_selected)
+	true_curve <- load_true_curve(Tt_selected) %>%
+		mutate(true_lambda = exp(true_theta1))
 
 	p <- ggplot() +
 		geom_ribbon(
 			data = plot_data,
-			aes(x = t, ymin = band_lower, ymax = band_upper, fill = method),
+			aes(x = t, ymin = lambda_lower, ymax = lambda_upper, fill = method),
 			alpha = 0.2
 		) +
 		geom_ribbon(
 			data = true_curve,
-			aes(x = t, ymin = true_theta1, ymax = true_theta1, fill = "true"),
+			aes(x = t, ymin = true_lambda, ymax = true_lambda, fill = "true"),
 			alpha = 0.2
 		) +
 		geom_line(
 			data = plot_data,
-			aes(x = t, y = post_mean_agg, color = method, linetype = method),
+			aes(x = t, y = lambda_mean, color = method, linetype = method),
 			linewidth = 0.35
 		) +
 		geom_line(
 			data = true_curve,
-			aes(x = t, y = true_theta1, color = "true", linetype = "true"),
+			aes(x = t, y = true_lambda, color = "true", linetype = "true"),
 			linewidth = 0.35
 		) +
 		facet_wrap(~f, nrow = facet_nrow, ncol = facet_ncol, labeller = as_labeller(FUNCTION_LABELS)) +
@@ -303,7 +312,7 @@ make_fig_overlay_hpd <- function(by_t, Tt_selected = 1600, facet_nrow = 2, facet
 			breaks = c(METHOD_LEVELS, "true")
 		) +
 		scale_x_continuous(labels = function(x) prefix_first_label(as.character(x), "(t)")) +
-		labs(x = NULL, y = expression(theta[t1])) +
+		labs(x = NULL, y = expression(lambda[t])) +
 		theme_paper() +
 		theme(axis.title.x = element_blank()) +
 		guides(
@@ -381,27 +390,171 @@ PARAM_LABELS <- c(
 	W2 = "W[2]"
 )
 
-make_fig_ess_style_boxplot <- function(plot_data, y_label, breaks_pow10 = -2:3, facet_nrow = 3, facet_ncol = 2) {
-	p <- ggplot(plot_data, aes(x = method, y = value, fill = method)) +
-		geom_boxplot(
-			notch = FALSE,
-			outlier.shape = 21,
-			outlier.fill = NA,
-			outlier.stroke = 0.1,
-			outlier.size = 0.4,
-			outlier.alpha = 1,
-			linewidth = 0.1
+# Point (median) + error bar (IQR) instead of a full boxplot: some methods
+# have very low ESS variance at high T, which renders as an imperceptibly
+# thin box even with free y-scales per panel -- a median point is always
+# visible regardless of how narrow the interval is. Outlier points (same
+# 1.5*IQR rule as geom_boxplot) can optionally be added back on top, since
+# summarising to just median/Q1/Q3 would otherwise discard them entirely --
+# off by default because it re-clutters panels where several methods
+# saturate near the max ESS (very low spread, lots of "outliers").
+compute_ess_outliers <- function(plot_data, group_vars) {
+	return(
+		plot_data %>%
+			group_by(across(all_of(group_vars))) %>%
+			mutate(
+				q25 = quantile(value, 0.25),
+				q75 = quantile(value, 0.75),
+				iqr = q75 - q25,
+				is_outlier = value < (q25 - 1.5 * iqr) | value > (q75 + 1.5 * iqr)
+			) %>%
+			ungroup() %>%
+			filter(is_outlier)
+	)
+}
+
+# pch 18 (solid diamond, used for sir_collapsed) renders visually smaller
+# than the other pch shapes at the same "size" value -- bump it up so all
+# five method markers read as similar visual weight.
+METHOD_POINT_SIZES <- c(
+	montoril = 1.6,
+	pg_apf = 1.6,
+	sir_laplace = 1.6,
+	sir_collapsed = 2.2,
+	stan = 1.6
+)
+
+# Theoretical ceiling on raw (bulk) ESS: S_total = S_per_chain * K_chains,
+# i.e. the total number of post-burn-in posterior samples a method could
+# ever report as ESS (ESS <= S_total always). The simulation study runs a
+# single chain per method (K = 1), unlike the real-data application (K = 3)
+# -- see the calibration table -- so this is its own constant, separate
+# from ESS_CEILING_REAL in figures_real_data.R.
+ESS_CEILING_SIM <- c(
+	montoril = 100000,
+	pg_apf = 20000,
+	sir_laplace = 10000,
+	sir_collapsed = 10000,
+	stan = 10000
+)
+
+# Proper log-scale minor gridlines (2,3,4,...,9 within each decade -- the
+# MATLAB-style log grid), instead of ggplot's default minor_breaks for a log
+# scale, which is just the arithmetic midpoint (in log space) between two
+# major breaks -- a single, visually meaningless line splitting each decade
+# in half.
+log_minor_breaks <- function(x) {
+	lo <- floor(log10(min(x)))
+	hi <- ceiling(log10(max(x)))
+	breaks <- as.vector(outer(2:9, 10^(lo:hi)))
+	return(breaks[breaks >= min(x) & breaks <= max(x)])
+}
+
+make_fig_ess_style_pointrange_by_T <- function(plot_data, y_label, breaks_pow10, facet_nrow = 3, facet_ncol = 2, show_outliers = FALSE, free_y = TRUE) {
+	summary_data <- plot_data %>%
+		group_by(method, Tt_factor, parameter) %>%
+		summarise(
+			median = median(value),
+			q25 = quantile(value, 0.25),
+			q75 = quantile(value, 0.75),
+			.groups = "drop"
+		)
+
+	p <- ggplot()
+
+	if (show_outliers) {
+		outlier_data <- compute_ess_outliers(plot_data, c("method", "Tt_factor", "parameter"))
+		p <- p + geom_point(
+			data = outlier_data,
+			aes(x = Tt_factor, y = value, color = method, group = method),
+			position = position_dodge(width = 0.6),
+			shape = 1,
+			size = 0.8,
+			alpha = 0.5,
+			show.legend = FALSE
+		)
+	}
+
+	p <- p +
+		geom_errorbar(
+			data = summary_data,
+			aes(x = Tt_factor, ymin = q25, ymax = q75, color = method, group = method),
+			position = position_dodge(width = 0.6),
+			width = 0.35,
+			linewidth = 0.35
+		) +
+		geom_point(
+			data = summary_data,
+			aes(x = Tt_factor, y = median, color = method, shape = method, size = method, group = method),
+			position = position_dodge(width = 0.6)
 		) +
 		facet_wrap(
 			~parameter,
 			nrow = facet_nrow,
 			ncol = facet_ncol,
+			scales = if (free_y) "free_y" else "fixed",
 			labeller = as_labeller(PARAM_LABELS, label_parsed)
 		) +
-		scale_fill_method() +
+		scale_color_method() +
+		scale_shape_method() +
+		scale_size_manual(values = METHOD_POINT_SIZES, breaks = METHOD_LEVELS, guide = "none") +
+		scale_y_log10(
+			breaks = 10^breaks_pow10,
+			minor_breaks = log_minor_breaks,
+			labels = label_number(big.mark = ",", drop0trailing = TRUE)
+		) +
+		labs(x = "T", y = y_label) +
+		theme_paper() +
+		guides(
+			color = guide_legend(nrow = 1, override.aes = list(size = unname(METHOD_POINT_SIZES[METHOD_LEVELS]))),
+			shape = guide_legend(nrow = 1, override.aes = list(size = unname(METHOD_POINT_SIZES[METHOD_LEVELS])))
+		)
+
+	return(p)
+}
+
+# Same point+errorbar idea, but for figures with no T breakdown (x = method
+# directly, one point per method per panel, no dodge needed).
+make_fig_ess_style_pointrange_by_method <- function(plot_data, y_label, breaks_pow10, facet_nrow = 1, facet_ncol = 4, show_outliers = FALSE) {
+	summary_data <- plot_data %>%
+		group_by(method, parameter) %>%
+		summarise(
+			median = median(value),
+			q25 = quantile(value, 0.25),
+			q75 = quantile(value, 0.75),
+			.groups = "drop"
+		)
+
+	p <- ggplot()
+
+	if (show_outliers) {
+		outlier_data <- compute_ess_outliers(plot_data, c("method", "parameter"))
+		p <- p + geom_point(
+			data = outlier_data,
+			aes(x = method, y = value, color = method),
+			shape = 1,
+			size = 0.8,
+			alpha = 0.5,
+			show.legend = FALSE
+		)
+	}
+
+	p <- p +
+		geom_errorbar(data = summary_data, aes(x = method, ymin = q25, ymax = q75, color = method), width = 0.3, linewidth = 0.35) +
+		geom_point(data = summary_data, aes(x = method, y = median, color = method, size = method)) +
+		facet_wrap(
+			~parameter,
+			nrow = facet_nrow,
+			ncol = facet_ncol,
+			scales = "free_y",
+			labeller = as_labeller(PARAM_LABELS, label_parsed)
+		) +
+		scale_color_method() +
+		scale_size_manual(values = METHOD_POINT_SIZES, breaks = METHOD_LEVELS, guide = "none") +
 		scale_x_discrete(labels = METHOD_LABELS) +
 		scale_y_log10(
 			breaks = 10^breaks_pow10,
+			minor_breaks = log_minor_breaks,
 			labels = function(x) {
 				ifelse(x == 1, "1.00", label_number(big.mark = ",", drop0trailing = TRUE)(x))
 			}
@@ -409,7 +562,7 @@ make_fig_ess_style_boxplot <- function(plot_data, y_label, breaks_pow10 = -2:3, 
 		labs(x = NULL, y = y_label) +
 		theme_paper() +
 		theme(
-			axis.text.x = element_text(angle = 0, hjust = 0.5, vjust = 1),
+			axis.text.x = element_text(angle = 40, hjust = 1, vjust = 1),
 			legend.position = "none"
 		)
 
@@ -417,7 +570,7 @@ make_fig_ess_style_boxplot <- function(plot_data, y_label, breaks_pow10 = -2:3, 
 }
 
 
-# ---- Figure 5: ESS/s boxplot by method and T, facet by parameter ----------
+# ---- Figure 5: ESS/s (median, IQR) by method and T, facet by parameter ----
 # Broken down by T (rather than pooling all T together) to see whether ESS/s
 # varies with T -- same x = T / dodge = method / facet = parameter layout as
 # the RMSE boxplot (Figure 1), covering all 6 parameters.
@@ -443,39 +596,11 @@ make_fig_ess_boxplot <- function(replicas) {
 			Tt_factor = factor(Tt)
 		)
 
-	p <- ggplot(plot_data, aes(x = Tt_factor, y = value, fill = method)) +
-		geom_boxplot(
-			notch = FALSE,
-			outlier.shape = 21,
-			outlier.fill = NA,
-			outlier.stroke = 0.1,
-			outlier.size = 0.4,
-			outlier.alpha = 1,
-			linewidth = 0.1,
-			position = position_dodge2(padding = 0.15)
-		) +
-		facet_wrap(
-			~parameter,
-			nrow = 3,
-			ncol = 2,
-			labeller = as_labeller(PARAM_LABELS, label_parsed)
-		) +
-		scale_fill_method() +
-		scale_y_log10(
-			breaks = 10^(-2:3),
-			labels = function(x) {
-				ifelse(x == 1, "1.00", label_number(big.mark = ",", drop0trailing = TRUE)(x))
-			}
-		) +
-		labs(x = "T", y = "ESS/s") +
-		theme_paper() +
-		guides(fill = guide_legend(nrow = 1))
-
-	return(p)
+	return(make_fig_ess_style_pointrange_by_T(plot_data, y_label = "ESS/s (median, IQR)", breaks_pow10 = -2:3))
 }
 
 
-# ---- Figure 6: raw ESS boxplot by method, facet by parameter (Tt = 1600) --
+# ---- Figure 6: raw ESS (median, IQR) by method and T, facet by parameter --
 
 make_fig_ess_raw_boxplot <- function(replicas) {
 	plot_data <- replicas %>%
@@ -498,34 +623,7 @@ make_fig_ess_raw_boxplot <- function(replicas) {
 			Tt_factor = factor(Tt)
 		)
 
-	p <- ggplot(plot_data, aes(x = Tt_factor, y = value, fill = method)) +
-		geom_boxplot(
-			notch = FALSE,
-			outlier.shape = 21,
-			outlier.fill = NA,
-			outlier.stroke = 0.1,
-			outlier.size = 0.4,
-			outlier.alpha = 1,
-			linewidth = 0.1,
-			position = position_dodge2(padding = 0.15)
-		) +
-		facet_wrap(
-			~parameter,
-			nrow = 3,
-			ncol = 2,
-			scales = "free_y",
-			labeller = as_labeller(PARAM_LABELS, label_parsed)
-		) +
-		scale_fill_method() +
-		scale_y_log10(
-			breaks = 10^(1:5),
-			labels = label_number(big.mark = ",", drop0trailing = TRUE)
-		) +
-		labs(x = "T", y = "ESS") +
-		theme_paper() +
-		guides(fill = guide_legend(nrow = 1))
-
-	return(p)
+	return(make_fig_ess_style_pointrange_by_T(plot_data, y_label = "ESS (median, IQR)", breaks_pow10 = 1:5))
 }
 
 
@@ -552,7 +650,7 @@ rolling_mean <- function(x, window) {
 # has none.
 BREAKPOINT_FRACTIONS <- c(0.25, 0.5, 0.75)
 
-make_fig_pointwise_coverage <- function(pointwise, Tt_selected = 1600, window = 21, functions = FUNCTION_LEVELS, facet_nrow = 2, facet_ncol = 2, show_Tt_in_title = FALSE, show_breakpoint_legend = TRUE) {
+make_fig_pointwise_coverage <- function(pointwise, Tt_selected = 1600, window = 21, functions = FUNCTION_LEVELS, facet_nrow = 2, facet_ncol = 2, show_Tt_in_title = FALSE, show_breakpoint_legend = TRUE, breakpoint_functions = c("constant", "linear", "quadratic")) {
 	plot_data <- pointwise %>%
 		filter(Tt == Tt_selected, f %in% functions) %>%
 		group_by(method, f) %>%
@@ -561,7 +659,7 @@ make_fig_pointwise_coverage <- function(pointwise, Tt_selected = 1600, window = 
 		ungroup()
 
 	breakpoint_data <- expand.grid(
-		f = factor(intersect(c("constant", "linear", "quadratic"), functions), levels = FUNCTION_LEVELS),
+		f = factor(intersect(breakpoint_functions, functions), levels = FUNCTION_LEVELS),
 		xintercept = BREAKPOINT_FRACTIONS * Tt_selected
 	)
 
@@ -641,6 +739,45 @@ extract_legend <- function(p) {
 	return(g$grobs[[idx]])
 }
 
+# Stacking plots into ONE gtable with truly equal panel sizes -- see also
+# figures_real_data.R (same helper, duplicated per that file's header note).
+#
+# gridExtra::arrangeGrob(heights = ...) treats each plot as an opaque box and
+# splits total height by the given weights -- since rows with less axis/strip
+# overhead (e.g. a blanked x-axis) end up with a visibly BIGGER panel than
+# rows with more overhead for the same weight, matching panel sizes required
+# fragile trial-and-error weight ratios. rbind()'ing the plots' gtables
+# instead merges them at the grid level, so each plot's "panel" row keeps its
+# default 1-null sizing -- when the combined gtable is finally drawn, all
+# panel rows compete equally for the same leftover space and end up exactly
+# the same height, regardless of how much fixed-size axis/strip content
+# surrounds them. Column widths are equalized first (same reasoning as
+# before: wider y-axis labels like "10,000" vs "1" would otherwise shift one
+# plot's panel columns relative to the other's).
+stack_plots_equal_panels <- function(plots, legend = NULL, legend_gap_pt = 0) {
+	grobs <- lapply(plots, ggplotGrob)
+
+	max_widths <- grobs[[1]]$widths
+	for (g in grobs[-1]) {
+		max_widths <- grid::unit.pmax(max_widths, g$widths)
+	}
+	for (i in seq_along(grobs)) {
+		grobs[[i]]$widths <- max_widths
+	}
+
+	combined <- grobs[[1]]
+	for (g in grobs[-1]) {
+		combined <- rbind(combined, g)
+	}
+
+	if (!is.null(legend)) {
+		combined <- gtable::gtable_add_rows(combined, heights = grobHeight(legend) + unit(legend_gap_pt, "pt"))
+		combined <- gtable::gtable_add_grob(combined, legend, t = nrow(combined), l = 1, r = ncol(combined))
+	}
+
+	return(combined)
+}
+
 # Prepends "(T)"/"(t)" to the first axis break instead of a separate,
 # dedicated axis-title line -- saves a full text row per plot. When facets
 # share one (non-free) x scale, the prefixed break is repeated under every
@@ -701,7 +838,8 @@ make_fig_article_rmse_coverage <- function(
 		facet_nrow = 1,
 		facet_ncol = facet_ncol,
 		show_Tt_in_title = TRUE,
-		show_breakpoint_legend = FALSE
+		show_breakpoint_legend = FALSE,
+		breakpoint_functions = functions
 	) +
 		scale_x_continuous(labels = function(x) prefix_first_label(as.character(x), "(t)")) +
 		labs(y = expression("Pt.wise"~95*"%"~Cov.~of~theta[t1])) +
@@ -726,24 +864,13 @@ make_fig_article_rmse_coverage <- function(
 		theme_paper() +
 		shrink_text +
 		guides(
-			color = guide_legend(nrow = 1),
+			color = guide_legend(nrow = 1, override.aes = list(size = unname(c(METHOD_POINT_SIZES[METHOD_LEVELS], breakpoint = 1.6)))),
 			linetype = guide_legend(nrow = 1),
-			shape = guide_legend(nrow = 1)
+			shape = guide_legend(nrow = 1, override.aes = list(size = unname(c(METHOD_POINT_SIZES[METHOD_LEVELS], breakpoint = 1.6))))
 		)
 	legend <- extract_legend(legend_plot)
 
-	# Rows 1-2 have less non-panel content than row 3 (no strip text on row 2,
-	# no x-axis on row 1) so an equal "null" split renders their actual panels
-	# taller than row 3's. Weighting them down brings the three panels to
-	# roughly the same height.
-	combined <- arrangeGrob(
-		p_rmse,
-		p_coverage,
-		p_pointwise,
-		legend,
-		ncol = 1,
-		heights = unit.c(unit(1, "null"), unit(1, "null"), unit(1.08, "null"), grobHeight(legend) + unit(legend_gap_pt, "pt"))
-	)
+	combined <- stack_plots_equal_panels(list(p_rmse, p_coverage, p_pointwise), legend = legend, legend_gap_pt = legend_gap_pt)
 
 	return(combined)
 }
@@ -751,11 +878,22 @@ make_fig_article_rmse_coverage <- function(
 
 # ---- Figure 9 (article): raw ESS + ESS/s, 2x2 grid, theta_t1 & W1 ---------
 
-make_fig_article_ess <- function(replicas, params = c("theta_t1", "W1"), Tt_selected = 1600) {
+# Forces two parameters that are on genuinely different scales (e.g.
+make_fig_article_ess <- function(
+	replicas,
+	params = c("theta_t1", "theta_t2", "W1", "W2"),
+	panel_spacing_pt = 2,
+	row_margin = margin(1, 6, 1, 4),
+	legend_gap_pt = 0,
+	font_size = 7
+) {
+	facet_ncol <- length(params)
+	shrink_text <- theme(text = element_text(size = font_size))
+	minor_grid <- theme(panel.grid.minor = element_line(color = "grey80", linewidth = 0.12, linetype = "dashed"))
+
 	plot_data_raw <- replicas %>%
-		filter(Tt == Tt_selected) %>%
 		select(
-			method,
+			method, Tt,
 			theta_t1 = ess_theta1_mean,
 			theta_t2 = ess_theta2_mean,
 			theta_01 = ess_theta_01,
@@ -763,13 +901,13 @@ make_fig_article_ess <- function(replicas, params = c("theta_t1", "W1"), Tt_sele
 			W1 = ess_W1,
 			W2 = ess_W2
 		) %>%
-		pivot_longer(cols = -method, names_to = "parameter", values_to = "value") %>%
+		pivot_longer(cols = -c(method, Tt), names_to = "parameter", values_to = "value") %>%
 		filter(parameter %in% params) %>%
-		mutate(parameter = factor(parameter, levels = params))
+		mutate(parameter = factor(parameter, levels = params), Tt_factor = factor(Tt))
 
 	plot_data_sec <- replicas %>%
 		select(
-			method,
+			method, Tt,
 			theta_t1 = ess_sec_theta1_mean,
 			theta_t2 = ess_sec_theta2_mean,
 			theta_01 = ess_sec_theta_01,
@@ -777,14 +915,96 @@ make_fig_article_ess <- function(replicas, params = c("theta_t1", "W1"), Tt_sele
 			W1 = ess_sec_W1,
 			W2 = ess_sec_W2
 		) %>%
-		pivot_longer(cols = -method, names_to = "parameter", values_to = "value") %>%
+		pivot_longer(cols = -c(method, Tt), names_to = "parameter", values_to = "value") %>%
 		filter(parameter %in% params) %>%
-		mutate(parameter = factor(parameter, levels = params))
+		mutate(parameter = factor(parameter, levels = params), Tt_factor = factor(Tt))
 
-	p_raw <- make_fig_ess_style_boxplot(plot_data_raw, y_label = "bulk-ESS", breaks_pow10 = 1:4, facet_nrow = 1, facet_ncol = 2)
-	p_sec <- make_fig_ess_style_boxplot(plot_data_sec, y_label = "bulk-ESS/s", facet_nrow = 1, facet_ncol = 2)
+	# Theoretical ceiling on raw ESS (S_total = S_per_chain * K_chains, K = 1
+	# here), one horizontal dashed segment per method -- aligned to that
+	# method's own position_dodge(width = 0.6) slot (the same dodge used by
+	# the actual point/error bar layers) via a zero-height geom_errorbar, so
+	# it lines up exactly under/over that method's points at every T.
+	ceiling_data <- expand.grid(
+		method = factor(METHOD_LEVELS, levels = METHOD_LEVELS),
+		Tt_factor = factor(sort(unique(plot_data_raw$Tt)))
+	)
+	ceiling_data$ceiling <- ESS_CEILING_SIM[as.character(ceiling_data$method)]
 
-	combined <- arrangeGrob(p_raw, p_sec, ncol = 1)
+	# Row 1 (raw ESS) and row 2 (ESS/s) share the same x variable (T), so
+	# row 1's x-axis text/ticks/title are dropped -- row 2's are enough. Both
+	# rows use one shared (non-free) y-axis across all 4 parameters instead
+	# of a free scale per panel -- ggplot then only draws y-axis text on the
+	# leftmost column, which both compacts the figure and matches the ranges
+	# already used for theta_t1 (row 1: 100/1,000/10,000) and W1/W2 (row 2:
+	# 0.01 through 1,000).
+	p_raw <- make_fig_ess_style_pointrange_by_T(plot_data_raw, y_label = "bulk-ESS", breaks_pow10 = 2:5, facet_nrow = 1, facet_ncol = facet_ncol, free_y = FALSE) +
+		geom_errorbar(
+			data = ceiling_data,
+			aes(x = Tt_factor, ymin = ceiling, ymax = ceiling, group = method),
+			position = position_dodge(width = 0.6),
+			width = 0.5,
+			linetype = "dashed",
+			color = "grey30",
+			linewidth = 0.4,
+			inherit.aes = FALSE
+		) +
+		shrink_text +
+		minor_grid +
+		theme(
+			legend.position = "none",
+			panel.spacing = unit(panel_spacing_pt, "pt"),
+			plot.margin = row_margin,
+			axis.text.x = element_blank(),
+			axis.ticks.x = element_blank(),
+			axis.title.x = element_blank()
+		)
+
+	# Row 2 skips its own facet strip titles -- row 1's, directly above,
+	# already name each parameter.
+	p_sec_full <- make_fig_ess_style_pointrange_by_T(plot_data_sec, y_label = "bulk-ESS/s", breaks_pow10 = -2:3, facet_nrow = 1, facet_ncol = facet_ncol, free_y = FALSE) +
+		scale_x_discrete(labels = function(x) prefix_first_label(x, "(T)")) +
+		shrink_text +
+		minor_grid +
+		theme(
+			panel.spacing = unit(panel_spacing_pt, "pt"),
+			plot.margin = row_margin,
+			strip.text = element_blank(),
+			strip.background = element_blank(),
+			axis.title.x = element_blank()
+		)
+	p_sec <- p_sec_full + theme(legend.position = "none")
+
+	# Shared bottom legend: built from synthetic dummy data (decoupled from
+	# the real panels) so a "Theoretical max" key -- same grey dashed style
+	# as the ceiling segments in row 1 -- can be appended after the method
+	# keys, instead of a separate in-panel legend. Methods get a "blank"
+	# linetype (they have no line in the real plot, only points).
+	legend_data <- data.frame(
+		x = 1,
+		y = 1,
+		method = factor(c(METHOD_LEVELS, "max_ess"), levels = c(METHOD_LEVELS, "max_ess"))
+	)
+	legend_plot <- ggplot(legend_data, aes(x = x, y = y, color = method, shape = method, linetype = method, size = method)) +
+		geom_line() +
+		geom_point() +
+		scale_color_manual(values = c(METHOD_COLORS, max_ess = "grey30"), labels = c(METHOD_LABELS, max_ess = "Theoretical max"), breaks = c(METHOD_LEVELS, "max_ess")) +
+		scale_shape_manual(values = c(METHOD_SHAPES, max_ess = NA), labels = c(METHOD_LABELS, max_ess = "Theoretical max"), breaks = c(METHOD_LEVELS, "max_ess")) +
+		scale_linetype_manual(
+			values = c(setNames(rep("blank", length(METHOD_LEVELS)), METHOD_LEVELS), max_ess = "dashed"),
+			labels = c(METHOD_LABELS, max_ess = "Theoretical max"),
+			breaks = c(METHOD_LEVELS, "max_ess")
+		) +
+		scale_size_manual(values = c(METHOD_POINT_SIZES, max_ess = 1.6), guide = "none") +
+		theme_paper() +
+		shrink_text +
+		guides(
+			color = guide_legend(nrow = 1, override.aes = list(size = unname(c(METHOD_POINT_SIZES[METHOD_LEVELS], max_ess = 1.6)))),
+			shape = guide_legend(nrow = 1, override.aes = list(size = unname(c(METHOD_POINT_SIZES[METHOD_LEVELS], max_ess = 1.6)))),
+			linetype = guide_legend(nrow = 1)
+		)
+	legend <- extract_legend(legend_plot)
+
+	combined <- stack_plots_equal_panels(list(p_raw, p_sec), legend = legend, legend_gap_pt = legend_gap_pt)
 
 	return(combined)
 }
@@ -845,7 +1065,7 @@ save_figure(
 save_figure(
 	plot = make_fig_article_ess(data$replicas),
 	filename = "article_ess.pdf",
-	height = 5.5
+	height = 2.8
 )
 
 cat("All figures written to", OUTPUT_DIR, "\n")
