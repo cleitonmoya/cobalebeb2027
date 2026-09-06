@@ -36,6 +36,8 @@ PATH_AGGREGATED <- file.path(RESULTS_DIR, "summary_aggregated.csv")
 PATH_BY_T <- file.path(RESULTS_DIR, "summary_by_t.csv")
 PATH_REPLICAS <- file.path(RESULTS_DIR, "summary_replicas.csv")
 PATH_POINTWISE <- file.path(RESULTS_DIR, "summary_pointwise_coverage.csv")
+PATH_PARTIAL_DIR <- file.path(RESULTS_DIR, "partial")
+PATH_RMSE_LAMBDA_CACHE <- file.path(RESULTS_DIR, "summary_replicas_rmse_lambda.csv")
 
 # Method identifiers, plotting order, and English display labels.
 METHOD_LEVELS <- c("montoril", "pg_apf", "sir_laplace", "sir_collapsed", "stan")
@@ -148,6 +150,52 @@ save_figure <- function(plot, filename, width = FULL_WIDTH, height) {
 
 # ---- Data loading -----------------------------------------------------------
 
+# RMSE of lambda_t = exp(theta_t1), per replica -- NOT a simple transform of
+# the already-computed rmse_theta1 (RMSE doesn't commute with a nonlinear
+# map like exp()), so it's recomputed from the raw per-replica, per-t
+# posterior mean (results/partial/{method}_{f}_{Tt}_{replica}.rds's
+# theta1_mean) against the true per-t theta1 (data/simulated/{f}_{Tt}_
+# {replica}.rds). Reads ~16,000 small .rds files (~30s) the first time, then
+# caches to a CSV like the other summary_*.csv files.
+compute_rmse_lambda <- function() {
+	if (file.exists(PATH_RMSE_LAMBDA_CACHE)) {
+		return(read.csv(PATH_RMSE_LAMBDA_CACHE, stringsAsFactors = FALSE))
+	}
+
+	cat("Computing RMSE of lambda_t = exp(theta_t1) from raw per-replica estimates (one-time; cached to", PATH_RMSE_LAMBDA_CACHE, ")\n")
+
+	Tt_levels <- c(200, 400, 800, 1600)
+	combos <- expand.grid(
+		method = METHOD_LEVELS, f = FUNCTION_LEVELS, Tt = Tt_levels, replica = 1:200,
+		stringsAsFactors = FALSE
+	)
+
+	true_cache <- new.env()
+	get_true_theta1 <- function(f, Tt, replica) {
+		key <- paste(f, Tt, replica, sep = "_")
+		if (!exists(key, envir = true_cache, inherits = FALSE)) {
+			path <- file.path(DATA_DIR, "simulated", sprintf("%s_%d_%d.rds", f, Tt, replica))
+			assign(key, readRDS(path)$theta1, envir = true_cache)
+		}
+		return(get(key, envir = true_cache, inherits = FALSE))
+	}
+
+	rmse_lambda1 <- numeric(nrow(combos))
+	for (i in seq_len(nrow(combos))) {
+		partial_path <- file.path(
+			PATH_PARTIAL_DIR,
+			sprintf("%s_%s_%d_%d.rds", combos$method[i], combos$f[i], combos$Tt[i], combos$replica[i])
+		)
+		est_theta1 <- readRDS(partial_path)$theta1_mean[[1]]
+		true_theta1 <- get_true_theta1(combos$f[i], combos$Tt[i], combos$replica[i])
+		rmse_lambda1[i] <- sqrt(mean((exp(est_theta1) - exp(true_theta1))^2))
+	}
+	combos$rmse_lambda1 <- rmse_lambda1
+
+	write.csv(combos, PATH_RMSE_LAMBDA_CACHE, row.names = FALSE)
+	return(combos)
+}
+
 load_data <- function() {
 	aggregated <- read.csv(PATH_AGGREGATED, stringsAsFactors = FALSE) %>%
 		mutate(
@@ -161,7 +209,10 @@ load_data <- function() {
 			f = factor(f, levels = FUNCTION_LEVELS)
 		)
 
+	rmse_lambda <- compute_rmse_lambda()
+
 	replicas <- read.csv(PATH_REPLICAS, stringsAsFactors = FALSE) %>%
+		left_join(rmse_lambda, by = c("method", "f", "Tt", "replica")) %>%
 		mutate(
 			method = factor(method, levels = METHOD_LEVELS),
 			f = factor(f, levels = FUNCTION_LEVELS)
@@ -179,12 +230,12 @@ load_data <- function() {
 
 # ---- Figure 1: RMSE per replica, boxplot, facet by function --------------
 
-make_fig_rmse_boxplot <- function(replicas, functions = FUNCTION_LEVELS, facet_nrow = 2, facet_ncol = 2) {
+make_fig_rmse_boxplot <- function(replicas, functions = FUNCTION_LEVELS, facet_nrow = 2, facet_ncol = 2, metric_col = "rmse_theta1", y_label = expression(RMSE~of~theta[t1])) {
 	plot_data <- replicas %>%
 		filter(f %in% functions) %>%
-		mutate(Tt_factor = factor(Tt))
+		mutate(Tt_factor = factor(Tt), metric_value = .data[[metric_col]])
 
-	p <- ggplot(plot_data, aes(x = Tt_factor, y = rmse_theta1, fill = method)) +
+	p <- ggplot(plot_data, aes(x = Tt_factor, y = metric_value, fill = method)) +
 		geom_boxplot(
 			notch = FALSE,
 			outlier.shape = 21,
@@ -197,7 +248,7 @@ make_fig_rmse_boxplot <- function(replicas, functions = FUNCTION_LEVELS, facet_n
 		) +
 		facet_wrap(~f, nrow = facet_nrow, ncol = facet_ncol, labeller = as_labeller(FUNCTION_LABELS)) +
 		scale_fill_method() +
-		labs(x = "T", y = expression(RMSE~of~theta[t1])) +
+		labs(x = "T", y = y_label) +
 		theme_paper() +
 		guides(fill = guide_legend(nrow = 1))
 
@@ -275,16 +326,6 @@ make_fig_overlay_hpd <- function(by_t, Tt_selected = 1600, facet_nrow = 2, facet
 		mutate(true_lambda = exp(true_theta1))
 
 	p <- ggplot() +
-		geom_ribbon(
-			data = plot_data,
-			aes(x = t, ymin = lambda_lower, ymax = lambda_upper, fill = method),
-			alpha = 0.2
-		) +
-		geom_ribbon(
-			data = true_curve,
-			aes(x = t, ymin = true_lambda, ymax = true_lambda, fill = "true"),
-			alpha = 0.2
-		) +
 		geom_line(
 			data = plot_data,
 			aes(x = t, y = lambda_mean, color = method, linetype = method),
@@ -301,11 +342,6 @@ make_fig_overlay_hpd <- function(by_t, Tt_selected = 1600, facet_nrow = 2, facet
 			labels = c(METHOD_LABELS, true = "True"),
 			breaks = c(METHOD_LEVELS, "true")
 		) +
-		scale_fill_manual(
-			values = c(METHOD_COLORS, true = "white"),
-			labels = c(METHOD_LABELS, true = "True"),
-			breaks = c(METHOD_LEVELS, "true")
-		) +
 		scale_linetype_manual(
 			values = c(METHOD_LINETYPES, true = "solid"),
 			labels = c(METHOD_LABELS, true = "True"),
@@ -317,7 +353,6 @@ make_fig_overlay_hpd <- function(by_t, Tt_selected = 1600, facet_nrow = 2, facet
 		theme(axis.title.x = element_blank()) +
 		guides(
 			color = guide_legend(nrow = 1, byrow = TRUE),
-			fill = guide_legend(nrow = 1, byrow = TRUE),
 			linetype = guide_legend(nrow = 1, byrow = TRUE)
 		)
 
@@ -805,7 +840,7 @@ make_fig_article_rmse_coverage <- function(
 
 	# Row 1 (RMSE) and row 2 (coverage vs T) share the same x variable (T),
 	# so row 1's x-axis text/ticks/title are dropped -- row 2's are enough.
-	p_rmse <- make_fig_rmse_boxplot(replicas, functions = functions, facet_nrow = 1, facet_ncol = facet_ncol) +
+	p_rmse <- make_fig_rmse_boxplot(replicas, functions = functions, facet_nrow = 1, facet_ncol = facet_ncol, metric_col = "rmse_lambda1", y_label = expression(RMSE~of~lambda[t])) +
 		shrink_text +
 		theme(
 			legend.position = "none",
@@ -820,7 +855,7 @@ make_fig_article_rmse_coverage <- function(
 	# already name each function.
 	p_coverage <- make_fig_coverage(aggregated, functions = functions, facet_nrow = 1, facet_ncol = facet_ncol) +
 		scale_x_discrete(labels = function(x) prefix_first_label(x, "(T)")) +
-		labs(y = expression(Emp.~95*"%"~Cov.~of~theta[1])) +
+		labs(y = expression(Emp.~95*"%"~Cov.~of~lambda[t])) +
 		shrink_text +
 		theme(
 			legend.position = "none",
@@ -842,7 +877,7 @@ make_fig_article_rmse_coverage <- function(
 		breakpoint_functions = functions
 	) +
 		scale_x_continuous(labels = function(x) prefix_first_label(as.character(x), "(t)")) +
-		labs(y = expression("Pt.wise"~95*"%"~Cov.~of~theta[t1])) +
+		labs(y = expression("Pt.wise"~95*"%"~Cov.~of~lambda[t])) +
 		shrink_text +
 		theme(legend.position = "none", panel.spacing = unit(panel_spacing_pt, "pt"), plot.margin = row_margin, axis.title.x = element_blank())
 

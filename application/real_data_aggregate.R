@@ -57,6 +57,7 @@ summary_df <- do.call(rbind, lapply(method_summaries, function(s) {
 		method = s$method, total_time = s$total_time,
 
 		rhat_theta1_max = s$rhat_theta1_max, rhat_theta2_max = s$rhat_theta2_max,
+		rhat_W1 = s$rhat_W1, rhat_W2 = s$rhat_W2,
 
 		ess_bulk_theta1_mean = s$ess_bulk_theta1_mean, ess_tail_theta1_mean = s$ess_tail_theta1_mean,
 		ess_bulk_theta1_min  = s$ess_bulk_theta1_min,  ess_tail_theta1_min  = s$ess_tail_theta1_min,

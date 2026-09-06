@@ -398,18 +398,12 @@ make_fig_article_real_fit_overlay <- function(fit, methods = METHOD_LEVELS, font
 			aes(x = date, y = y),
 			fill = "grey55", width = 28, alpha = 0.7
 		) +
-		geom_ribbon(
-			data = plot_data,
-			aes(x = date, ymin = lambda_ci_lower, ymax = lambda_ci_upper, fill = method),
-			alpha = 0.15
-		) +
 		geom_line(
 			data = plot_data,
 			aes(x = date, y = lambda_mean, color = method, linetype = method),
 			linewidth = 0.4
 		) +
 		scale_color_method() +
-		scale_fill_method() +
 		scale_linetype_method() +
 		scale_x_date(date_breaks = "1 year", date_labels = "%Y") +
 		scale_y_continuous(limits = c(0, 60), breaks = c(0, 20, 40, 60), expand = expansion(mult = c(0, 0))) +
@@ -426,7 +420,6 @@ make_fig_article_real_fit_overlay <- function(fit, methods = METHOD_LEVELS, font
 		) +
 		guides(
 			color = guide_legend(nrow = 1, byrow = TRUE),
-			fill = guide_legend(nrow = 1, byrow = TRUE),
 			linetype = guide_legend(nrow = 1, byrow = TRUE)
 		)
 
