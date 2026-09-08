@@ -1046,60 +1046,30 @@ make_fig_article_ess <- function(
 
 
 # ---- Run everything ---------------------------------------------------------
+#
+# Only the manuscript's final figures are generated here -- the intermediate
+# diagnostic ones (per-metric standalone RMSE/coverage/ESS/pointwise-coverage/
+# CPU-time plots) were dropped; their code (make_fig_rmse_boxplot(),
+# make_fig_coverage(), etc.) is kept since the three figures below still
+# call it internally. Recoverable from git history if needed again.
 
 data <- load_data()
 
 save_figure(
-	plot = make_fig_rmse_boxplot(data$replicas),
-	filename = "rmse.pdf",
-	height = 5.2
-)
-
-save_figure(
-	plot = make_fig_coverage(data$aggregated),
-	filename = "coverage.pdf",
-	height = 5.2
-)
-
-save_figure(
 	plot = make_fig_overlay_hpd(data$by_t, Tt_selected = 1600, facet_nrow = 1, facet_ncol = 4),
-	filename = "article_hpd.pdf",
+	filename = "simulation_fit.pdf",
 	height = 1.8
 )
 
 save_figure(
-	plot = make_fig_total_time(data$replicas),
-	filename = "total_cpu_time.pdf",
-	height = 3.2
-)
-
-save_figure(
-	plot = make_fig_ess_boxplot(data$replicas),
-	filename = "ess_sec.pdf",
-	height = 7.0
-)
-
-save_figure(
-	plot = make_fig_ess_raw_boxplot(data$replicas),
-	filename = "ess.pdf",
-	height = 7.0
-)
-
-save_figure(
-	plot = make_fig_pointwise_coverage(data$pointwise, Tt_selected = 1600),
-	filename = "pointwise_coverage.pdf",
-	height = 5.2
-)
-
-save_figure(
 	plot = make_fig_article_rmse_coverage(data$replicas, data$aggregated, data$pointwise),
-	filename = "article_rmse_coverage.pdf",
+	filename = "simulation_rmse_coverage.pdf",
 	height = 4.45
 )
 
 save_figure(
 	plot = make_fig_article_ess(data$replicas),
-	filename = "article_ess.pdf",
+	filename = "simulation_ess.pdf",
 	height = 2.8
 )
 

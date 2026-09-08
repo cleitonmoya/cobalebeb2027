@@ -1,7 +1,7 @@
 # ============================================================================
 # figures_real_data.R
 #
-# Generates all real-data-application figures (fit + HPD band, R_hat(t),
+# Generates all real-data-application figures (fit, R_hat(t),
 # raw ESS, ESS/s, cross-method agreement Delta_max(t), total CPU time,
 # log_lik/log_cpo) for the Cobal/EBEB 2027 manuscript, from
 # method_summaries.rds, delta_max.rds, summary.csv (application/real_data_run.R's
@@ -19,9 +19,9 @@
 # shared style changes in figures.R, mirror the change here too.
 #
 # Figures produced (see bottom of file):
-#   real_fit.pdf              - y_t vs lambda_hat + 95% HPD band, facet by method
+#   real_fit.pdf               - y_t vs lambda_hat + 95% HPD band, facet by method
 #   real_rhat.pdf              - R_hat(t), facet by parameter (theta_t1, theta_t2)
-#   real_ess.pdf                - raw ESS (bulk + tail), facet by parameter (6)
+#   real_ess.pdf               - raw ESS (bulk + tail), facet by parameter (6)
 #   real_ess_sec.pdf           - ESS/s (bulk + tail), facet by parameter (6)
 #   real_delta_max.pdf         - cross-method agreement Delta_max(t)
 #   real_total_time.pdf        - total CPU time by method
@@ -808,60 +808,23 @@ write_real_data_results_table <- function(summary_df, delta_max_W1, delta_max_W2
 
 
 # ---- Run everything ---------------------------------------------------------
+#
+# Only the manuscript's final figures are generated here -- the intermediate
+# diagnostic ones (per-metric standalone fit/R_hat/ESS/Delta_max/CPU-time/
+# fit-metrics plots) were dropped; their code is kept in case it's needed
+# again. Recoverable from git history if needed again.
 
 data <- load_data()
 
 save_figure(
-	plot = make_fig_real_fit(data$fit),
-	filename = "real_fit.pdf",
-	height = 4.4
-)
-
-save_figure(
-	plot = make_fig_real_rhat(data$rhat_t),
-	filename = "real_rhat.pdf",
-	height = 3.0
-)
-
-save_figure(
-	plot = make_fig_real_ess(data$ess_raw),
-	filename = "real_ess.pdf",
-	height = 7.0
-)
-
-save_figure(
-	plot = make_fig_real_ess_sec(data$ess_sec),
-	filename = "real_ess_sec.pdf",
-	height = 7.0
-)
-
-save_figure(
-	plot = make_fig_real_delta_max(data$delta_max),
-	filename = "real_delta_max.pdf",
-	height = 2.8
-)
-
-save_figure(
-	plot = make_fig_real_total_time(data$summary),
-	filename = "real_total_time.pdf",
-	height = 3.0
-)
-
-save_figure(
-	plot = make_fig_real_fit_metrics(data$summary),
-	filename = "real_fit_metrics.pdf",
-	height = 3.2
-)
-
-save_figure(
 	plot = make_fig_article_real_fit_overlay(data$fit),
-	filename = "article_real_data_fit.pdf",
+	filename = "real_data_fit.pdf",
 	height = 1.8
 )
 
 save_figure(
 	plot = make_fig_article_real_ess(data$ess_raw, data$ess_sec),
-	filename = "article_real_data_ess.pdf",
+	filename = "real_data_ess.pdf",
 	height = 2.8
 )
 
