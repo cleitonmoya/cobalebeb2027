@@ -25,7 +25,7 @@ The paper compares five Bayesian samplers for this model:
 | Method            | Description                                                           |
 |-------------------|-----------------------------------------------------------------------|
 | `amh_montoril`    | Adaptive Metropolis-Hastings (componentwise, Robbins–Monro tuning)    |
-| `pg_as`           | Particle Gibbs with Auxiliary Particle Filter / Ancestor Sampling     |
+| `pg_as`           | Particle Gibbs with Ancestor Sampling                                 |
 | `sir_laplace`     | Sampling-Importance-Resampling with Laplace/IRLS approximation        |
 | `sir_collapsed`   | **Main methodological contribution**: Collapsed version of SIR/Laplace|
 | `stan`            | HMC/NUTS via Stan — reference / gold-standard sampler                 |
@@ -111,7 +111,7 @@ cobalebeb2027/
 
 `PoissonLTDM` is the R/Rcpp package containing the production implementation
 of all five samplers. Performance-critical inner loops (`amh_montoril`,
-`pg_apf`/`pg_as`, `sir_laplace`, `sir_collapsed`) are implemented in C++
+`pg_as`, `sir_laplace`, `sir_collapsed`) are implemented in C++
 (`src/`), sharing common routines through `utils.h`. `sampler_stan.R` wraps
 the Stan/`rstan` model in `inst/stan/poisson_ltdm.stan`.
 
@@ -199,14 +199,14 @@ trend types, `<Tt>` the series length, and `<replica>` the replica index.
 ## Calibration
 
 `calibration/` tunes the number of MCMC/SMC iterations (`N`), burn-in, and
-(for `pg_apf`/`pg_as`) the number of particles `K` for each sampler, over a
+(for `pg_as`) the number of particles `K` for each sampler, over a
 grid of configurations, selecting the setting with the best efficiency/ESS
 trade-off. The values used in the production study were:
 
 | Method                                | N       | burnin | K   |
 |----------------------------------------|---------|--------|-----|
 | `amh_montoril`                         | 110,000 | 10,000 | —   |
-| `pg_apf`/`pg_as`                       | 22,000  | 2,000  | 200 |
+| `pg_as`                                | 22,000  | 2,000  | 200 |
 | `sir_laplace`, `sir_collapsed`, `stan` | 11,000  | 1,000  | —   |
 
 These are stored per-method in `R_config` inside `simulation/simulation_run.R`.
