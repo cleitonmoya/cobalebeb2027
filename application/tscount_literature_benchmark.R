@@ -1,10 +1,10 @@
 # application/tscount_literature_benchmark.R
 #
-# Reproduces the four observation-driven literature benchmarks reported in
+# Reproduces the two observation-driven literature benchmarks reported in
 # Table (predictive log-likelihood, campy application): INGARCH (identity
-# link) and log-linear (log link) models, each under Poisson and negative
-# binomial observation distributions. All via tscount::tsglm() (Liboschik,
-# Fokianos & Fried, 2017).
+# link) and log-linear (log link) models, both under a Poisson observation
+# distribution. All via tscount::tsglm() (Liboschik, Fokianos & Fried,
+# 2017).
 #
 # IMPORTANT PROVENANCE NOTE (see chat discussion -- do not drop when citing
 # these numbers):
@@ -16,23 +16,14 @@
 #     Their paper does not print a log-likelihood value at all -- the
 #     -434.384 figure is entirely our own refit, not a number from the
 #     paper.
-#   - INGARCH NegBin, log-linear Poisson, log-linear NegBin: none of these
-#     three are reproductions of a published fit to the campy series. They
-#     follow the general model classes described in Liboschik et al.
-#     (2017) (identity link = INGARCH per Ferland et al. 2006; log link =
-#     Fokianos & Tjostheim 2011) but are fits WE performed, not results
-#     from a specific paper.
+#   - Log-linear Poisson: not a reproduction of a published fit to the
+#     campy series. It follows the general model class described in
+#     Liboschik et al. (2017) (log link = Fokianos & Tjostheim 2011) but is
+#     a fit WE performed, not a result from a specific paper.
 #
-# Estimation method (all four): conditional maximum likelihood via
-# constrOptim (barrier method + BFGS using the analytical score, Liboschik
-# et al. 2017, Sec. 3.1). For the negative binomial cases, per Christou &
-# Fokianos (2014): the regression coefficients are estimated by POISSON
-# quasi-likelihood (provably independent of the dispersion parameter), and
-# the dispersion parameter sigma^2 = 1/phi is estimated in a SEPARATE
-# second step via a Pearson chi^2 moment equation (Liboschik et al. 2017,
-# Eq. 10) -- not joint likelihood maximization. This is why the regression
-# coefficients below come out numerically IDENTICAL between the Poisson
-# and NegBin fit within each link family (confirmed below).
+# Estimation method (both): conditional maximum likelihood via constrOptim
+# (barrier method + BFGS using the analytical score, Liboschik et al. 2017,
+# Sec. 3.1).
 #
 # logLik() on a fitted tsglm object returns the TRUE (not quasi) log-
 # likelihood including all constant terms (Liboschik et al. 2017, Sec. 5)
@@ -43,6 +34,10 @@
 # from y_1,...,y_{t-1} only) -- comparable to the particle-filter
 # predictive log-likelihood, NOT to log_lik/log_cpo (which use the
 # smoothed posterior mean, conditioning on the whole series).
+
+setwd(dirname(this.path::this.path()))
+path_results <- "../results/application"
+dir.create(path_results, showWarnings = FALSE, recursive = TRUE)
 
 library(tscount)
 data(campy)
@@ -101,17 +96,7 @@ fit_ingarch_poisson <- tsglm(
 timing_ingarch_poisson <- time_model_cpu(function() tsglm(
 	campy, model = list(past_obs = 1, past_mean = c(7, 13)), link = "identity", distr = "poisson"))
 
-# ---- 2. INGARCH, negative binomial (identity link) ----
-fit_ingarch_nbin <- tsglm(
-	campy,
-	model = list(past_obs = 1, past_mean = c(7, 13)),
-	link = "identity",
-	distr = "nbinom"
-)
-timing_ingarch_nbin <- time_model_cpu(function() tsglm(
-	campy, model = list(past_obs = 1, past_mean = c(7, 13)), link = "identity", distr = "nbinom"))
-
-# ---- 3. Log-linear model, Poisson (log link) -- Fokianos & Tjostheim
+# ---- 2. Log-linear model, Poisson (log link) -- Fokianos & Tjostheim
 # (2011) model class ----
 fit_loglinear_poisson <- tsglm(
 	campy,
@@ -122,44 +107,21 @@ fit_loglinear_poisson <- tsglm(
 timing_loglinear_poisson <- time_model_cpu(function() tsglm(
 	campy, model = list(past_obs = 1, past_mean = 13), link = "log", distr = "poisson"))
 
-# ---- 4. Log-linear model, negative binomial (log link) ----
-fit_loglinear_nbin <- tsglm(
-	campy,
-	model = list(past_obs = 1, past_mean = 13),
-	link = "log",
-	distr = "nbinom"
-)
-timing_loglinear_nbin <- time_model_cpu(function() tsglm(
-	campy, model = list(past_obs = 1, past_mean = 13), link = "log", distr = "nbinom"))
-
 # ---- Summary table ----
 results <- data.frame(
-	model = c("INGARCH, Poisson", "INGARCH, NegBin", "Log-linear, Poisson", "Log-linear, NegBin"),
-	link = c("identity", "identity", "log", "log"),
-	distr = c("poisson", "nbinom", "poisson", "nbinom"),
-	predictive_loglik = c(logLik(fit_ingarch_poisson), logLik(fit_ingarch_nbin),
-						   logLik(fit_loglinear_poisson), logLik(fit_loglinear_nbin)),
-	AIC = c(AIC(fit_ingarch_poisson), AIC(fit_ingarch_nbin),
-			AIC(fit_loglinear_poisson), AIC(fit_loglinear_nbin)),
-	cpu_time_mean_sec = c(timing_ingarch_poisson$mean, timing_ingarch_nbin$mean,
-						   timing_loglinear_poisson$mean, timing_loglinear_nbin$mean),
-	cpu_time_se_sec = c(timing_ingarch_poisson$se, timing_ingarch_nbin$se,
-						 timing_loglinear_poisson$se, timing_loglinear_nbin$se),
+	model = c("INGARCH, Poisson", "Log-linear, Poisson"),
+	link = c("identity", "log"),
+	distr = c("poisson", "poisson"),
+	predictive_loglik = c(logLik(fit_ingarch_poisson), logLik(fit_loglinear_poisson)),
+	AIC = c(AIC(fit_ingarch_poisson), AIC(fit_loglinear_poisson)),
+	cpu_time_mean_sec = c(timing_ingarch_poisson$mean, timing_loglinear_poisson$mean),
+	cpu_time_se_sec = c(timing_ingarch_poisson$se, timing_loglinear_poisson$se),
 	stringsAsFactors = FALSE
 )
 
-printf("=== Predictive log-likelihood, 4 literature benchmarks (campy) ===")
+printf("=== Predictive log-likelihood, 2 literature benchmarks (campy) ===")
 print(results, row.names = FALSE)
 
-# ---- Confirms the regression-coefficient invariance noted above: Poisson
-# vs. NegBin coefficients are identical within each link family (only the
-# dispersion parameter sigmasq differs, estimated in a separate step). ----
-printf("\n=== Confirming Christou & Fokianos (2014): regression coefficients")
-printf("    identical between Poisson and NegBin fits within each link family ===")
-printf("INGARCH (identity link):")
-print(rbind(Poisson = coef(fit_ingarch_poisson)[1:4], NegBin = coef(fit_ingarch_nbin)[1:4]))
-printf("\nLog-linear (log link):")
-print(rbind(Poisson = coef(fit_loglinear_poisson), NegBin = coef(fit_loglinear_nbin)[1:3]))
-
-write.csv(results, file = "tscount_literature_benchmark.csv", row.names = FALSE)
-printf("\nSaved to tscount_literature_benchmark.csv")
+results_file <- sprintf("%s/tscount_literature_benchmark.csv", path_results)
+write.csv(results, file = results_file, row.names = FALSE)
+printf("\nSaved to %s", results_file)

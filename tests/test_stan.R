@@ -48,11 +48,32 @@ y <- data$y
 theta1_true <- data$theta
 changepoints <- c(0.25, 0.5, 0.75)*Tt
 
-# Compute the seed (based on pattern)
+# Compute the seed -- SAME pattern as simulation_run.R's production
+# task_grid$seed formula:
+#   seed_base(m, g, tau, r) = m*1e7 + g*1e6 + tau*1e5 + 10000 + r*10
+# where m/g/tau are 1-based indices into method_grid/function_grid/Tt_grid
+# (method_grid above already matches simulation_run.R's methods_grid_ref /
+# calibration_run.R's method_grid index-for-index, "stan" included).
+# seed_base here IS the seed of that (method, f, Tt, replica)'s production
+# chain 1; chain k below reuses the existing seed_base + (k - 1)
+# convention (same as calibration_run.R) to reproduce every one of that
+# task's production chains exactly (see simulation_run.R's header comment
+# for the full derivation and the collision-avoidance rationale against
+# calibration's seeds).
+#
+# calibration_run.R uses a related but distinct formula, replacing the
+# fixed "10000" term with config_idx*1e3 (config_idx = the 1-based row
+# index of that method's candidate N/burnin/K configuration in
+# calibration_run.R's method_configs table -- not applicable outside
+# calibration):
+#   seed_base_calib(m, g, tau, c, r) = m*1e7 + g*1e6 + tau*1e5 + c*1e3 + r*10
+# To instead reproduce a specific calibration chain's seed here, replace
+# "+ 10000" below with "+ config_idx * 1e3", using that config's
+# config_idx from calibration_run.R's method_configs.
 method_idx <- match(method, method_grid)
 Tt_idx <- match(Tt, Tt_grid)
 f_idx <- match(f, function_grid)
-seed_base <- method_idx*1e5 + f_idx*1e4 + Tt_idx*1e3 + replica*10
+seed_base <- method_idx*1e7 + f_idx*1e6 + Tt_idx*1e5 + 10000 + replica*10
 
 # ---- Parameters and initialization ----
 # General simulation parameters

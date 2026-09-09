@@ -34,7 +34,8 @@ Two applications are reported:
    comparing sampler efficiency and estimation accuracy.
 2. A **real-data application** to the `campy` dataset (weekly campylobacteriosis
    counts, Quebec, 1990–2000; from the `tscount` package), benchmarked against
-   observation-driven models fit with `tscount::tsglm()`.
+   two observation-driven models fit with `tscount::tsglm()` and evaluated via
+   one-step-ahead predictive log-likelihood (bootstrap particle filter).
 
 ## Repository structure
 
@@ -43,6 +44,8 @@ cobalebeb2027/
 ├── PoissonLTDM/                  # R package (Rcpp) — the samplers
 │   ├── R/                        # metrics.R, sampler_stan.R, RcppExports.R
 │   ├── src/                      # utils.h + one .cpp per sampler + RcppExports.cpp
+│   │                              # (*.o/*.so are build artifacts, gitignored —
+│   │                              #  pkgload::load_all() recompiles them locally)
 │   └── inst/stan/                # poisson_ltdm.stan
 │
 ├── R_prototypes/                 # Didactic, pure-R reference implementations
@@ -50,10 +53,11 @@ cobalebeb2027/
 │                                  #  sir_collapsed_r() — signatures mirror the *_cpp() ones)
 │
 ├── tests/                        # Correctness / validation harness
-│   ├── test_prototype_R.R
-│   ├── test_cpp.R
-│   ├── test_validation.R
-│   └── plot_diagnostics.R
+│   ├── test_prototype_R.R        # Single sampler, R prototype
+│   ├── test_cpp.R                # Single sampler, Rcpp port (sequential or parallel chains)
+│   ├── test_R_vs_cpp.R           # R prototype vs Rcpp port, numeric agreement
+│   ├── test_stan.R               # Stan (NUTS) sampler
+│   └── plot_diagnostics.R        # Shared diagnostics/plotting helper
 │
 ├── data/
 │   ├── data_generation.R         # Generates the synthetic series used by both
@@ -63,30 +67,41 @@ cobalebeb2027/
 ├── calibration/                  # Tuning phase (N / burnin / K per method)
 │   ├── calibration_run.R
 │   ├── calibration_aggregate.R
+│   ├── calibration_aggregate.pbs
 │   ├── calibration_pbs.tmpl
-│   ├── check_calibration_progress.R
-│   └── registry_calibration/     # batchtools registry (cluster runs)
+│   └── check_calibration_progress.R
 │
 ├── simulation/                   # Production simulation study
 │   ├── simulation_run.R
 │   ├── simulation_grid_config.R  # run_mode / grid_subset — edit without touching simulation_run.R
-│   ├── simulation_aggregate.R
+│   ├── simulation_aggregate.R    # summary_replicas/by_t/aggregated.csv (pointwise coverage
+│   │                              # is a column of summary_by_t.csv, not a separate file)
 │   ├── simulation_pbs.tmpl
-│   ├── check_simulation_progress.R
-│   └── registry_simulation/      # batchtools registry (cluster runs)
+│   └── check_simulation_progress.R
 │
-├── results/
-│   ├── calibration/
-│   └── partial/                  # per-task .rds results from the production run
+├── results/                      # batchtools/cluster subfolders are gitignored
+│   │                              # (results/simulation/partial/, results/application/chains/,
+│   │                              #  results/calibration/*.rds) — everything else is versioned
+│   ├── calibration/               # summary.csv + plots/ versioned; per-config .rds gitignored
+│   ├── simulation/                # summary_*.csv versioned; partial/ (per-task .rds) gitignored
+│   └── application/               # summaries + benchmark CSVs versioned; chains/ gitignored
 │
-├── real_data_run.R               # Fits all five samplers to `campy`
-├── real_data_aggregate.R
-├── figures_real_data.R           # article_real_data_fit.pdf, article_real_data_ess.pdf
-├── predictive_loglik_pf.R        # Predictive log-likelihood via particle filter
-├── tscount_literature_benchmark.R# INGARCH-family benchmarks via tscount::tsglm()
+├── application/                  # Real-data application (`campy`)
+│   ├── real_data_run.R           # Fits all five samplers to `campy` (+ aggregation)
+│   ├── real_data_pbs.sh          # PBS wrapper for real_data_run.R
+│   ├── real_data_aggregate.R     # Optional: re-aggregate existing checkpoints
+│   ├── predictive_loglik_pf.R    # Predictive log-likelihood via particle filter
+│   ├── predictive_loglik_pf_pbs.sh
+│   ├── tscount_literature_benchmark.R      # INGARCH/log-linear Poisson benchmarks
+│   └── tscount_literature_benchmark_pbs.sh
 │
-├── cache/                        # Compiled Stan model cache (not versioned)
-└── latex/                        # Manuscript source
+├── paper_plots/
+│   ├── figures_simulation.R      # Simulation-study figures
+│   ├── figures_real_data.R       # article_real_data_fit.pdf, article_real_data_ess.pdf,
+│   │                              # + console-printed results tables (no LaTeX output)
+│   └── plots/                    # Rendered PDFs
+│
+└── cache/                        # Compiled Stan model cache (not versioned)
 ```
 
 ## The `PoissonLTDM` package
@@ -106,8 +121,12 @@ pkgload::load_all("PoissonLTDM")   # for development / interactive use
 devtools::install("PoissonLTDM")    # for a regular package install
 ```
 
-<!-- TODO: list hard package dependencies (Rcpp, RcppArmadillo/Eigen if used,
-     rstan, posterior, Matrix, ...) once DESCRIPTION is finalized -->
+The package's own runtime dependencies (per `PoissonLTDM/DESCRIPTION`) are
+`Matrix`, `HDInterval`, `rstan`, `Rcpp` (`Imports`) and `Rcpp`,
+`RcppArmadillo` (`LinkingTo`). `convergence.cpp` (the `rhat_ess_fast()`
+implementation) additionally needs **FFTW3** and **OpenMP** at the system
+level — see [Requirements](#requirements) below; the other four `.cpp`
+files need neither.
 
 ### `R_prototypes/`
 
@@ -124,17 +143,33 @@ implementation against which the C++ port is validated (see below).
 The `tests/` directory is the correctness harness, not an automated
 `testthat` suite bundled with the package — it is meant to be run manually.
 
-- **`test_prototype_R.R`** / **`test_cpp.R`** — run a single sampler
-  (selected via an `algorithm <- "..."` variable at the top of the file) on
-  one dataset, with all hyperparameters and initial values exposed inline in
-  the script (no shared config layer). Diagnostics and plots are produced by
-  the shared `plot_diagnostics.R` helper (`print_and_plot_diagnostics()`),
-  which adapts automatically to the fields returned by each algorithm
-  (SMC-ESS, MH acceptance rate, IS-ESS, CE-calibration diagnostics, etc.).
-- **`test_validation.R`** — runs the R prototype and the C++ port with the
+- **`test_prototype_R.R`** / **`test_cpp.R`** / **`test_stan.R`** — run a
+  single sampler (`method`/`f`/`Tt`/`replica` set inline near the top of
+  each file) on one simulated dataset, with all hyperparameters and initial
+  values exposed inline in the script (no shared config layer).
+  `test_cpp.R` and `test_stan.R` run `N_chains` dispersed-initialization
+  chains (`test_cpp.R` sequentially or in parallel, via `parallel_chains`;
+  `test_stan.R` via `rstan::sampling()`'s own `chains=`/`cores=`).
+  Diagnostics and plots are produced by the shared `plot_diagnostics.R`
+  helper (`print_and_plot_diagnostics()`), which adapts automatically to
+  the fields returned by each algorithm (SMC-ESS, MH acceptance rate,
+  IS-ESS, CE-calibration diagnostics, multi-chain R-hat/ESS, etc.).
+- **`test_R_vs_cpp.R`** — runs the R prototype and the C++ port with the
   same seed and configuration and compares every output field with
   `testthat::expect_equal(tolerance = 1e-10)`. This is the check that the
   Rcpp port is numerically faithful to the didactic R implementation.
+- **`test_rhat_ess_fast.R`** — validates `PoissonLTDM::rhat_ess_fast()`
+  (the C++/FFTW3/OpenMP reimplementation of multi-chain R-hat/bulk-ESS/
+  tail-ESS) against `posterior::rhat()`/`ess_bulk()`/`ess_tail()`, and
+  benchmarks its speed at production scale.
+
+All four single-sampler/multi-chain scripts (`test_prototype_R.R`,
+`test_cpp.R`, `test_stan.R`) compute their random seed with the same
+formula `simulation_run.R` uses for its production task grid — running one
+of them for a given `(method, f, Tt, replica)` reproduces the exact seed
+of that combination's production chain 1 (see the comment above each
+script's seed computation for the formula, and for how to instead
+reproduce a specific `calibration_run.R` chain).
 
 Note on exact reproducibility across implementations: bit-exact agreement
 between the R and C++ RNG paths (`sample()`/`sample.int()` in R vs. the
@@ -147,7 +182,7 @@ To run a validation check:
 
 ```r
 setwd("tests")
-source("test_validation.R")   # edit `algorithm` at the top to choose which sampler
+source("test_R_vs_cpp.R")   # edit `method`/`f`/`Tt`/`replica` at the top to choose which case
 ```
 
 ## Data generation
@@ -175,22 +210,25 @@ These are stored per-method in `R_config` inside `simulation/simulation_run.R`.
 
 ## Production simulation
 
-The full simulation study spans $T \in \{200, 400, 800, 2000\}$, four
+The full simulation study spans $T \in \{200, 400, 800, 1600\}$, four
 function types, and $R = 200$ replicas for **all five methods**, including
-`stan` (the `stan` replica count was raised mid-study from an initial
-$R=50$ reference subsample to the full $R=200$, once compute budget allowed
-it). It was run on an external HPC cluster (PBS Pro scheduler,
-`batchtools` job arrays), with each job handling a chunk of tasks
-(`simulation_run.R` + `simulation_pbs.tmpl`). `simulation_grid_config.R`
-isolates `run_mode` and `grid_subset`, so the grid can be edited directly on
-the cluster without resubmitting the whole script.
+`stan` (matching the committed results in `results/simulation/`; `stan`'s
+replica count was raised mid-study from an initial $R=50$ reference
+subsample to the full $R=200$ once compute budget allowed it, and
+`R_config` in `simulation_run.R` reflects that final value). It was run on
+an external HPC cluster (PBS Pro scheduler, `batchtools` job arrays), with
+each job handling a chunk of tasks (`simulation_run.R` + `simulation_pbs.tmpl`).
+`simulation_grid_config.R` isolates `run_mode` and `grid_subset`, so the
+grid can be edited directly on the cluster without resubmitting the whole
+script.
 
 Aggregation (`simulation_aggregate.R`) reduces the per-task `.rds` files in
-`results/partial/` into three CSVs at different granularities:
+`results/simulation/partial/` into three CSVs at different granularities:
 
 - `summary_replicas.csv` — one row per replica (scalar summaries only).
 - `summary_by_t.csv` — one row per method × function × $T$ × time index $t$
-  (bias, interval width, and dispersion band of the estimator over time).
+  (bias, interval width, pointwise coverage, and dispersion band of the
+  estimator over time).
 - `summary_aggregated.csv` — one row per method × function × $T$, fully
   reduced.
 
@@ -202,73 +240,145 @@ to sanity-check the pipeline should reduce `grid_subset` in
 
 ## Real-data application
 
-`real_data_run.R` fits all five samplers to the `campy` dataset;
-`real_data_aggregate.R` collects the results; `figures_real_data.R` produces
-the article figures (`article_real_data_fit.pdf`, a five-method overlay with
-observed counts, HPD ribbon, and posterior mean lines; and
-`article_real_data_ess.pdf`). `predictive_loglik_pf.R` computes out-of-sample
-predictive log-likelihood via a particle filter (parallelized with
-`parallel::mclapply`, FORK backend). `tscount_literature_benchmark.R` fits
-four observation-driven INGARCH-family models via `tscount::tsglm()` for
-comparison. All nine methods (5 PoissonLTDM samplers + 4 literature
-benchmarks) are combined into a single results table,
-`table_predictive_loglik_cputime.tex`.
+The `application/` directory holds the full real-data pipeline, applied to
+the `campy` dataset (weekly campylobacteriosis counts, Quebec, 1990–2000;
+`tscount::campy`). All of its outputs are written to `results/application/`.
+
+- **`real_data_run.R`** fits all five PoissonLTDM samplers to `campy`, using
+  `K_chains = 3` dispersed-initialization chains per method (15 chain-units
+  total, calibration-validated `N`/`burnin`/`K` per method) so that
+  convergence (R-hat, bulk/tail ESS) can be assessed within this single
+  application. Chain checkpoints are written to
+  `results/application/chains/`; once all 15 exist, the script
+  **automatically aggregates them in the same run** into
+  `method_summaries.rds`, `delta_max.rds` (cross-method agreement), and
+  `summary.csv` — no separate aggregation step is needed. Runs locally, or
+  via `real_data_pbs.sh` (`qsub real_data_pbs.sh`) on a PBS cluster.
+- **`real_data_aggregate.R`** is an optional, disposable utility, **not**
+  part of the required reproduction path: it re-derives
+  `method_summaries.rds`/`delta_max.rds`/`summary.csv` from chain
+  checkpoints that already exist on disk, without re-running any sampling
+  (useful only if `aggregate_method()` in `real_data_run.R` changes after
+  the chains have already been run).
+- **`predictive_loglik_pf.R`** computes the one-step-ahead **predictive
+  log-likelihood** for all five samplers via a bootstrap particle filter
+  (`N_COMMON = 200,000` particles, `N_REPLICATES = 100` independent runs
+  per method), reading the raw chain checkpoints directly from
+  `results/application/chains/` — **requires `real_data_run.R` to have
+  completed first**. Parallelized across the (method × replicate) task grid
+  with `parallel::mclapply` (FORK backend). Writes
+  `predictive_loglik_pf.csv` (summary), `predictive_loglik_pf.rds`, and
+  `predictive_loglik_pf_replicates.rds` (per-replicate draws) to
+  `results/application/`. Runs locally, or via `predictive_loglik_pf_pbs.sh`.
+- **`tscount_literature_benchmark.R`** fits the two observation-driven
+  literature benchmarks (INGARCH, identity link; log-linear, log link;
+  both Poisson) via `tscount::tsglm()`, for comparison against the five
+  PoissonLTDM samplers. Writes `tscount_literature_benchmark.csv`
+  (predictive log-likelihood, AIC, CPU time) to `results/application/`.
+  Runs locally, or via `tscount_literature_benchmark_pbs.sh`.
+- **`paper_plots/figures_real_data.R`** produces the article figures
+  (`article_real_data_fit.pdf`, a five-method overlay with observed counts,
+  HPD ribbon, and posterior mean lines; `article_real_data_ess.pdf`) and
+  prints two results tables to the console (no LaTeX output — the
+  manuscript's numbers are copied from this printout by hand): log-
+  likelihood/log-CPO and cross-method agreement for the five PoissonLTDM
+  samplers, and predictive log-likelihood + CPU time across **all 7
+  methods** (the 5 samplers, via `predictive_loglik_pf.csv`, plus the 2
+  `tscount` benchmarks, via `tscount_literature_benchmark.csv`) — so this
+  script requires `predictive_loglik_pf.R` and
+  `tscount_literature_benchmark.R` to have run first, in addition to
+  `real_data_run.R`. All read from `results/application/`.
 
 This part of the pipeline is lightweight and runs on a standard laptop in
-minutes — it is the recommended entry point for reproducing a concrete result
-from the paper without cluster access.
+minutes per script — it is the recommended entry point for reproducing a
+concrete result from the paper without cluster access.
 
 ## Reproducing the results
 
 1. **Install the package** and its dependencies — see `PoissonLTDM/DESCRIPTION`
-   for the authoritative list; the packages known to be required are `Rcpp`,
-   `rstan`, `Matrix`, `posterior`, `coda`, `batchtools`, `tscount`,
-   `this.path`, `testthat`, `parallel`, `foreach`, `doRNG`, and `ggplot2`
-   (see [Requirements](#requirements) below).
-2. **Sanity-check correctness**: run `tests/test_validation.R` to confirm the
+   for the authoritative package-level list (`Matrix`, `HDInterval`, `rstan`,
+   `Rcpp`, `RcppArmadillo`); the top-level scripts additionally need
+   `posterior`, `batchtools`, `tscount`, `this.path`, `testthat`, `parallel`,
+   `foreach`, `doRNG`, and `ggplot2` (see [Requirements](#requirements) below).
+2. **Sanity-check correctness**: run `tests/test_R_vs_cpp.R` to confirm the
    R prototype and the Rcpp port agree.
 3. **Reproduce the real-data application** (fastest path to a paper figure):
-   run `real_data_run.R`, then `real_data_aggregate.R` and
-   `figures_real_data.R`.
+   from `application/`, run `real_data_run.R` (fits the 5 samplers and
+   aggregates them in one pass), then `predictive_loglik_pf.R` (predictive
+   log-likelihood) and `tscount_literature_benchmark.R` (literature
+   benchmarks); finally `paper_plots/figures_real_data.R` for the article
+   figures and console-printed results tables — see
+   [Real-data application](#real-data-application) above for each script's
+   output files and dependency order. `real_data_aggregate.R` is optional
+   and not needed for this path.
 4. **Reproduce a small slice of the simulation study locally**: generate a
-   reduced dataset with `data/data_generation.R`, restrict
-   `simulation_grid_config.R` to a few configurations, and run
-   `simulation/simulation_run.R` directly (outside `batchtools`) for a single
-   task.
+   reduced dataset with `data/data_generation.R`; in
+   `simulation_grid_config.R`, set `run_mode <- "local"` (it defaults to
+   `"cluster"`, which dispatches to `batchtools`/PBS instead of running in
+   the current session) and restrict `grid_subset` to a handful of chunks
+   (see the commented-out example filters already in that file); then run
+   `simulation/simulation_run.R` directly.
 5. **Reproduce the full simulation study**: requires a PBS Pro (or adaptable)
    HPC cluster; see `calibration/` and `simulation/` for the job submission
    templates and `batchtools` registries.
 
 ## Requirements
 
-- **R** 4.5.1 (2025-06-13), `x86_64-conda-linux-gnu`, tested on Debian GNU/Linux
-  13 (trixie); BLAS/LAPACK via OpenBLAS 0.3.30 / LAPACK 3.12.0 (conda
-  environment). The production simulation additionally ran under R 4.4.3 on
-  an external HPC cluster — both are compatible with the packages below.
-- **R packages** (pinned versions from the development environment):
+`renv.lock`, at the repository root, pins the exact environment (R version
++ every package, direct and transitive) that produced every number under
+`results/` — generated **on the HPC cluster**, where calibration, the
+production simulation, and the real-data application all actually ran.
+Restore it with:
 
-  | Package      | Version    |
-  |--------------|------------|
-  | `Rcpp`       | 1.1.1.1.1  |
-  | `rstan`      | 2.32.7     |
-  | `Matrix`     | 1.7.5      |
-  | `posterior`  | 1.7.0      |
-  | `coda`       | 0.19.4.1 <!-- status: possibly no longer imported directly — ESS/R-hat migrated to `posterior` on 2026-08-13; confirm with `grep -rn "coda::" --include="*.R" .` before pinning as a direct dependency --> |
-  | `batchtools` | 0.9.18     |
-  | `tscount`    | 1.4.3      |
-  | `this.path`  | 2.8.0      |
-  | `testthat`   | 3.3.2      |
-  | `foreach`    | 1.5.2      |
-  | `doRNG`      | 1.8.6.3    |
-  | `ggplot2`    | 4.0.3      |
+```r
+install.packages("renv")   # if not already installed
+renv::restore()
+```
 
-- **System**: a working C++ compiler toolchain for `Rcpp`/`rstan` compilation
-  (`gcc`/`g++`); PBS Pro (or an adaptable scheduler) only if reproducing the
-  full-grid production simulation on a cluster.
+`PoissonLTDM` and the handful of its own dependencies (`RcppArmadillo`,
+`Matrix`, `lattice`) that `renv`'s source scanner doesn't detect from
+`pkgload::load_all("../PoissonLTDM")` calls are declared explicitly in a
+project-level `DESCRIPTION` at the repository root (distinct from
+`PoissonLTDM/DESCRIPTION`, the package's own), so `renv::restore()` always
+resolves them correctly.
 
-A pinned `renv.lock` (via `renv::init()` + `renv::snapshot()` at the
-repository root) is the recommended way to freeze this environment for
-long-term reproducibility, in place of the manual table above.
+- **R**: 4.4.3 (cluster, pinned by `renv.lock`) or 4.5.1
+  (`x86_64-conda-linux-gnu`, development laptop, conda `r1` environment,
+  OpenBLAS 0.3.30/LAPACK 3.12.0) — both compatible with the packages below.
+- **R packages**, exact versions from `renv.lock`:
+
+  | Package         | Version    |
+  |-----------------|------------|
+  | `PoissonLTDM`   | 0.0.1 (local) |
+  | `Rcpp`          | 1.1.2      |
+  | `RcppArmadillo` | 15.6.0-1   |
+  | `rstan`         | 2.32.7     |
+  | `Matrix`        | 1.7-2      |
+  | `HDInterval`    | 0.2.4      |
+  | `posterior`     | 1.7.0      |
+  | `batchtools`    | 0.9.18     |
+  | `tscount`       | 1.4.3      |
+  | `this.path`     | 2.8.0      |
+  | `foreach`       | 1.5.2      |
+  | `doRNG`         | 1.8.6.3    |
+  | `ggplot2`       | 4.0.3      |
+  | `dplyr`         | 1.2.1      |
+
+  `renv.lock` has the full set (78 packages). `testthat` (3.3.2) and
+  `tidyr` (1.3.2) are used only by `tests/test_R_vs_cpp.R` and
+  `paper_plots/`, which never ran on the cluster, so they aren't in
+  `renv.lock` — install them separately (versions from the development
+  environment) if running those. `coda` isn't listed at all: ESS/R-hat
+  migrated to `posterior` and `PoissonLTDM::rhat_ess_fast()` during
+  development, and no `coda::` call remains in the repository.
+
+- **System**: a working C++ compiler toolchain for `Rcpp`/`rstan`
+  compilation (`gcc`/`g++`, C++17); **FFTW3** and **OpenMP**, needed only to
+  compile `PoissonLTDM/src/convergence.cpp` (`rhat_ess_fast()`) — installed
+  via `conda install -c conda-forge fftw` in the development environment,
+  since it isn't available as a system `apt` package here; PBS Pro (or an
+  adaptable scheduler) only if reproducing the full-grid production
+  simulation or calibration on a cluster.
 
 ## Coming soon
 

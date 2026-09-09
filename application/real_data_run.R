@@ -59,7 +59,7 @@ pkgload::load_all("../PoissonLTDM", debug = FALSE, quiet = TRUE)
 printf <- function(...) cat(paste(sprintf(...), "\n"))
 
 path_data           <- "../data/real"
-path_results         <- "../results/real_data"
+path_results         <- "../results/application"
 path_results_chains  <- sprintf("%s/%s", path_results, "chains")
 dir.create(path_data, showWarnings = FALSE, recursive = TRUE)
 dir.create(path_results_chains, showWarnings = FALSE, recursive = TRUE)

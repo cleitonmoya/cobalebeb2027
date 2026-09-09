@@ -34,7 +34,7 @@
 # average out.
 #
 # walltime=8h: NOT a measured runtime (the script itself, R_timing=30 x
-# B_timing=50 x 4 models = 6000 tsglm() calls, should take well under 10
+# B_timing=50 x 2 models = 3000 tsglm() calls, should take well under 10
 # minutes) -- set purely to route to Parallel_longX rather than
 # Parallel_shortX (walltime <= 6h routes to the short queue -- see
 # project memory / real_data_pbs.sh's identical reasoning). The job exits

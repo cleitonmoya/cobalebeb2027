@@ -14,7 +14,7 @@
 # This file only defines amh_montoril_r(). It has no side effects (no data
 # loading, no plotting) -- see tests/ for scripts that call it, either
 # standalone (test_prototype_R.R) or against the Rcpp port (test_cpp.R,
-# test_validation.R). Signature mirrors amh_montoril_cpp() 1:1.
+# test_R_vs_cpp.R). Signature mirrors amh_montoril_cpp() 1:1.
 #
 # Author: Cleiton Moya de Almeida
 

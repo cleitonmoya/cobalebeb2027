@@ -1,7 +1,7 @@
 # simulation/simulation_aggregate.R
 #
 # Builds the three consolidated output files from every per-replica .rds
-# checkpoint under results/partial/ (written by run_task() in
+# checkpoint under results/simulation/partial/ (written by run_task() in
 # simulation.R, whether the task ran locally or as a cluster job):
 #
 #   - summary_replicas.csv   -- 1 row per (method, f, Tt, replica); every
@@ -10,10 +10,16 @@
 #                                theta1_ci_width_mean, RMSE, MAE, ESS/s,
 #                                etc.)
 #   - summary_by_t.csv       -- 1 row per (method, f, Tt, t); Bias(t) with
-#                                its Monte Carlo CI, width(t), and the
-#                                estimator-dispersion band (mean +/- HDI
-#                                across replicas) -- see metricas_theta1.tex
-#                                Sections 2.2 and 3.6-3.7 for the formulas.
+#                                its Monte Carlo CI, width(t), pointwise
+#                                coverage(t), and the estimator-dispersion
+#                                band (mean +/- HDI across replicas) -- see
+#                                metricas_theta1.tex Sections 2.2 and
+#                                3.6-3.7 for the formulas. coverage(t) is
+#                                the fraction of replicas whose HPD interval
+#                                covered theta1_true at that specific t --
+#                                distinct from summary_aggregated.csv's
+#                                "coverage", which is averaged over BOTH
+#                                replicas AND t.
 #   - summary_aggregated.csv -- 1 row per (method, f, Tt); RMSE/MAE
 #                                mean+SD, global coverage + SE + Wilson CI,
 #                                global width, ESS/s mean+SD, mean
@@ -116,11 +122,21 @@ for (i in seq_len(nrow(cells))) {
 	# instead of one replica's posterior draws.
 	band <- metrics_theta_ci(theta1_mean_mat, credmass_band)
 
+	# Pointwise coverage(t) (formerly compute_pointwise_coverage.R, merged
+	# in): fraction of replicas whose HPD interval covered theta1_true at
+	# this specific t -- reuses the same ci_lower_mat/ci_upper_mat/
+	# theta1_true already computed above for bias(t)/width(t), no second
+	# pass over the .rds checkpoints needed.
+	true_mat     <- matrix(theta1_true, nrow = R, ncol = Tt, byrow = TRUE)
+	covered_mat  <- (true_mat >= ci_lower_mat) & (true_mat <= ci_upper_mat)
+	coverage_t   <- colMeans(covered_mat)
+
 	by_t_rows[[i]] <- data.frame(
 		method = cell$method, f = cell$f, Tt = Tt, t = seq_len(Tt),
 		bias = bias_t, bias_mcse = mcse_bias_t,
 		bias_ci_lower = bias_ci_lower, bias_ci_upper = bias_ci_upper,
 		width_mean = width_t,
+		coverage = coverage_t,
 		post_mean_agg = post_mean_agg,
 		band_lower = band$ci_lower, band_upper = band$ci_upper,
 		stringsAsFactors = FALSE

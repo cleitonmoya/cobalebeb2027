@@ -1,0 +1,16 @@
+Package: cobalebeb2027
+Type: Project
+Title: Poisson Local Trend Dynamic Model -- reproducibility repository
+Description: Declares project-level dependencies for renv (this repository
+    is not itself an R package). renv's automatic source scanner does not
+    recognize pkgload::load_all("../PoissonLTDM") as a dependency on the
+    PoissonLTDM package, so it -- and PoissonLTDM's own LinkingTo/Imports
+    chain (RcppArmadillo, Matrix, lattice) -- are declared explicitly here
+    instead. See PoissonLTDM/DESCRIPTION for the package's own dependencies.
+Imports:
+    PoissonLTDM,
+    Matrix,
+    RcppArmadillo,
+    lattice
+Remotes:
+    local::./PoissonLTDM

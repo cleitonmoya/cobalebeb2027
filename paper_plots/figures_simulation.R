@@ -35,7 +35,6 @@ dir.create(OUTPUT_DIR, showWarnings = FALSE)
 PATH_AGGREGATED <- file.path(RESULTS_DIR, "summary_aggregated.csv")
 PATH_BY_T <- file.path(RESULTS_DIR, "summary_by_t.csv")
 PATH_REPLICAS <- file.path(RESULTS_DIR, "summary_replicas.csv")
-PATH_POINTWISE <- file.path(RESULTS_DIR, "summary_pointwise_coverage.csv")
 PATH_PARTIAL_DIR <- file.path(RESULTS_DIR, "partial")
 PATH_RMSE_LAMBDA_CACHE <- file.path(RESULTS_DIR, "summary_replicas_rmse_lambda.csv")
 
@@ -218,13 +217,7 @@ load_data <- function() {
 			f = factor(f, levels = FUNCTION_LEVELS)
 		)
 
-	pointwise <- read.csv(PATH_POINTWISE, stringsAsFactors = FALSE) %>%
-		mutate(
-			method = factor(method, levels = METHOD_LEVELS),
-			f = factor(f, levels = FUNCTION_LEVELS)
-		)
-
-	return(list(aggregated = aggregated, by_t = by_t, replicas = replicas, pointwise = pointwise))
+	return(list(aggregated = aggregated, by_t = by_t, replicas = replicas))
 }
 
 
@@ -685,8 +678,8 @@ rolling_mean <- function(x, window) {
 # has none.
 BREAKPOINT_FRACTIONS <- c(0.25, 0.5, 0.75)
 
-make_fig_pointwise_coverage <- function(pointwise, Tt_selected = 1600, window = 21, functions = FUNCTION_LEVELS, facet_nrow = 2, facet_ncol = 2, show_Tt_in_title = FALSE, show_breakpoint_legend = TRUE, breakpoint_functions = c("constant", "linear", "quadratic")) {
-	plot_data <- pointwise %>%
+make_fig_pointwise_coverage <- function(by_t, Tt_selected = 1600, window = 21, functions = FUNCTION_LEVELS, facet_nrow = 2, facet_ncol = 2, show_Tt_in_title = FALSE, show_breakpoint_legend = TRUE, breakpoint_functions = c("constant", "linear", "quadratic")) {
+	plot_data <- by_t %>%
 		filter(Tt == Tt_selected, f %in% functions) %>%
 		group_by(method, f) %>%
 		arrange(t) %>%
@@ -827,7 +820,7 @@ prefix_first_label <- function(labels, prefix) {
 # ---- (vs t), 3x2 grid, constant & quadratic --------------------------------
 
 make_fig_article_rmse_coverage <- function(
-	replicas, aggregated, pointwise,
+	replicas, aggregated, by_t,
 	functions = FUNCTION_LEVELS,
 	Tt_selected = 1600,
 	panel_spacing_pt = 2,
@@ -867,7 +860,7 @@ make_fig_article_rmse_coverage <- function(
 		)
 
 	p_pointwise <- make_fig_pointwise_coverage(
-		pointwise,
+		by_t,
 		Tt_selected = Tt_selected,
 		functions = functions,
 		facet_nrow = 1,
@@ -1062,7 +1055,7 @@ save_figure(
 )
 
 save_figure(
-	plot = make_fig_article_rmse_coverage(data$replicas, data$aggregated, data$pointwise),
+	plot = make_fig_article_rmse_coverage(data$replicas, data$aggregated, data$by_t),
 	filename = "simulation_rmse_coverage.pdf",
 	height = 4.45
 )

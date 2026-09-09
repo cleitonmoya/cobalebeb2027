@@ -1,9 +1,11 @@
 # simulation/simulation_run.R
 #
 # Full simulation grid (Estrategia C):
-#   - R=200 for the 4 compared methods (montoril, pg_apf, sir_laplace,
-#     sir_collapsed)
-#   - R_stan=50 for stan (reference/gold-standard only, not compared)
+#   - R=200 for all five methods (montoril, pg_apf, sir_laplace,
+#     sir_collapsed, stan) -- stan's R was raised from an initial R=50
+#     reference subsample to the full R=200 once compute budget allowed it;
+#     R_config below reflects that final value, matching the committed
+#     results/simulation/ output.
 #   - 4 functions x 4 Tt values
 #
 # Architecture mirrors calibration_phase.R: single file, re-sourced by
@@ -110,7 +112,7 @@ source("simulation_grid_config.R", local = FALSE)
 # ==========================================================================
 
 path_data <- "../data/simulated"
-path_results <- "../results"
+path_results <- "../results/simulation"
 path_results_partial <- sprintf("%s/%s", path_results, "partial")
 dir.create(path_results_partial, showWarnings = FALSE, recursive = TRUE)
 
@@ -174,7 +176,7 @@ theta1_tilde_scal <- 0 # sir_laplace and sir_collapsed
 R_config <- data.frame(
 	method   = c("montoril", "pg_apf",  "sir_laplace", "sir_collapsed", "stan"),
 	category = c("leve",     "medio",   "leve",        "leve",          "pesado"),
-	R        = c(200,        200,       200,           200,             50),
+	R        = c(200,        200,       200,           200,             200),
 	N        = c(110000,     22000,     11000,         11000,           11000),
 	burnin   = c(10000,      2000,      1000,          1000,            1000),
 	K        = c(NA,         200,       NA,            NA,              NA),

@@ -1,7 +1,7 @@
 # application/real_data_aggregate.R
 #
 # DISPOSABLE utility script -- NOT part of the permanent pipeline. Use only
-# when the 15 chain-unit checkpoints (../results/real_data/chains/*.rds)
+# when the 15 chain-unit checkpoints (../results/application/chains/*.rds)
 # already exist from a prior run, and aggregate_method() in real_data_run.R
 # has changed since then (e.g., the theta1/theta2 95% HPD band added for
 # application/figures_real_data.R) -- this re-derives method_summaries.rds,
@@ -21,6 +21,11 @@
 
 REAL_DATA_DEFS_ONLY <- TRUE
 source("real_data_run.R")
+
+# path_results is also set inside real_data_run.R (sourced above into this
+# same global environment) -- redeclared here explicitly so it doesn't
+# silently depend on an implementation detail of the sourced script.
+path_results <- "../results/application"
 
 printf("Re-aggregating from %d existing chain-unit checkpoint(s) (no resampling, no parallel cluster).", nrow(chain_grid))
 
@@ -78,4 +83,3 @@ saveRDS(list(theta1 = delta_max_theta1, theta2 = delta_max_theta2, W1 = delta_ma
 write.csv(summary_df, file = sprintf("%s/summary.csv", path_results), row.names = FALSE)
 
 printf("Re-aggregation done. Summary saved to %s/summary.csv", path_results)
-print(summary_df)

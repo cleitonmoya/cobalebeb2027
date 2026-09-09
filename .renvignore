@@ -1,0 +1,9 @@
+data/simulated/
+data/simulated_fixed/
+data/real/
+results/
+cache/
+backup/
+paper_plots/plots/
+PoissonLTDM/src/*.o
+PoissonLTDM/src/*.so

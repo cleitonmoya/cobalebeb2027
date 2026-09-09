@@ -3,7 +3,7 @@
 # Shared diagnostics/plotting routine for the Poisson 2nd-order polynomial
 # DLM samplers. Used by both test_prototype_R.R (pure R) and test_cpp.R
 # (Rcpp), so the same battery of plots/summary stats is produced regardless
-# of which implementation was run -- only test_validation.R (which compares
+# of which implementation was run -- only test_R_vs_cpp.R (which compares
 # the two numerically) does not use this file.
 #
 # `result_list` must be a list of N_chains elements, each containing at

@@ -7,7 +7,7 @@
 # samples is a legitimate draw of (theta_01, theta_02, W1, W2); every
 # particle carries its own (W1, W2) through every time step.
 #
-# Reads the RAW CHAIN CHECKPOINTS directly (../results/real_data/chains/),
+# Reads the RAW CHAIN CHECKPOINTS directly (../results/application/chains/),
 # NOT method_summaries.rds. Does not depend on, modify, or re-run any of
 # the 5 samplers themselves -- purely a post-hoc evaluation of their
 # already-computed posterior samples.
@@ -52,7 +52,7 @@ setwd(dirname(this.path::this.path()))
 printf <- function(...) cat(paste(sprintf(...), "\n"))
 
 path_data <- "../data/real"
-path_results <- "../results/real_data"
+path_results <- "../results/application"
 path_results_chains <- sprintf("%s/chains", path_results)
 
 y <- readRDS(sprintf("%s/campy.rds", path_data))

@@ -8,7 +8,7 @@
 # Two independent checks:
 #
 #   1. Data-level completeness (ground truth). Compares actual .rds
-#      checkpoint files in results/partial/ against the full expected
+#      checkpoint files in results/simulation/partial/ against the full expected
 #      task_grid, broken down by category and by grid cell
 #      (method x f x Tt). This is what actually matters -- run_task()
 #      itself only ever trusts file existence, never batchtools'

@@ -5,7 +5,7 @@
 # diagnostic battery (see plot_diagnostics.R). This is the R-only
 # counterpart to test_cpp.R -- same data, same diagnostics, so the two are
 # directly comparable by eye. For a numeric R-vs-C++ comparison, see
-# test_validation.R instead.
+# test_R_vs_cpp.R instead.
 
 rm(list = ls())
 options(error = function() traceback(2))
@@ -32,12 +32,36 @@ data <- readRDS(paste("../data/simulated/", source_name, ".rds", sep = ""))
 y <- data$y
 theta1_true <- data$theta
 
-# Compute the seed (based on pattern)
-method_idx <- match(method, method_grid)
+# Full method grid used ONLY for the seed formula below -- index must
+# match simulation_run.R's methods_grid_ref / calibration_run.R's
+# method_grid exactly, including "stan" (which this script doesn't run),
+# so amh_montoril/pg_as/sir_laplace/sir_collapsed keep the SAME index
+# here as in production regardless of which subset this script exercises.
+method_grid_seed_ref <- c("amh_montoril", "pg_as", "sir_laplace", "sir_collapsed", "stan")
+
+# Compute the seed -- SAME pattern as simulation_run.R's production
+# task_grid$seed formula:
+#   seed_base(m, g, tau, r) = m*1e7 + g*1e6 + tau*1e5 + 10000 + r*10
+# where m/g/tau are 1-based indices into method_grid_seed_ref/
+# function_grid/Tt_grid. This reproduces the EXACT seed of that
+# (method, f, Tt, replica)'s production chain 1 (see simulation_run.R's
+# header comment for the full derivation and the collision-avoidance
+# rationale against calibration's seeds).
+#
+# calibration_run.R uses a related but distinct formula, replacing the
+# fixed "10000" term with config_idx*1e3 (config_idx = the 1-based row
+# index of that method's candidate N/burnin/K configuration in
+# calibration_run.R's method_configs table -- not applicable outside
+# calibration):
+#   seed_base_calib(m, g, tau, c, r) = m*1e7 + g*1e6 + tau*1e5 + c*1e3 + r*10
+# To instead reproduce a specific calibration chain's seed here, replace
+# "+ 10000" below with "+ config_idx * 1e3", using that config's
+# config_idx from calibration_run.R's method_configs.
+method_idx <- match(method, method_grid_seed_ref)
 Tt_idx <- match(Tt, Tt_grid)
 f_idx <- match(f, function_grid)
 
-seed <- method_idx*1e5 + f_idx*1e4 + Tt_idx*1e3 + replica
+seed <- method_idx*1e7 + f_idx*1e6 + Tt_idx*1e5 + 10000 + replica*10
 set.seed(seed)
 printf("Running %s (R prototype) for %s, seed=%d", method, source_name, seed)
 

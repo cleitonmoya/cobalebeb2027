@@ -1,5 +1,7 @@
 cache/
 backup/
-simulation/results
-simulation/pbs_script
-results/
+results/simulation/partial/
+results/application/chains/
+results/calibration/*.rds
+PoissonLTDM/src/*.o
+PoissonLTDM/src/*.so
