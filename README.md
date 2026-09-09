@@ -9,7 +9,7 @@ Model"**, submitted to the VIII Latin American Meeting on Bayesian Statistics
 * Cleiton Moya de Almeida (PIPGEs UFSCar/USP)
 * Michel Helcias Montoril (UFSCar)
 
-![Posterior fit (95% HPD band) of all five samplers against the campy dataset](paper_plots/plots/real_data/real_data_fit.png)
+![Raw ESS and ESS/second for all five samplers, real-data application](paper_plots/plots/real_data/real_data_ess.png)
 
 ## Overview
 
