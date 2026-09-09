@@ -5,8 +5,9 @@ application of **"Efficient Samplers for the Poisson Local Trend Dynamic
 Model"**, submitted to the VIII Latin American Meeting on Bayesian Statistics
 (VIII COBAL) / XVIII Brazilian Meeting of Bayesian Statistics (EBEB), 2027.
 
-*Author information is withheld while this submission is under double-blind
-review.*
+Authors: 
+* Cleiton Moya de Almeida (PIPGEs UFSCar/USP)
+* Michel Helcias Montoril (UFSCar)
 
 ## Overview
 
@@ -19,23 +20,23 @@ structural-time-series nomenclature.
 
 The paper compares five Bayesian samplers for this model:
 
-| Method            | Description                                                        |
-|-------------------|---------------------------------------------------------------------|
-| `amh_montoril`    | Adaptive Metropolis-Hastings (componentwise, Robbins–Monro tuning)  |
-| `pg_apf` / `pg_as`| Particle Gibbs with Auxiliary Particle Filter / Ancestor Sampling   |
-| `sir_laplace`     | Sampling-Importance-Resampling with Laplace/IRLS approximation      |
-| `sir_collapsed`   | **Main methodological contribution**: collapsed Gibbs with a Cross-Entropy-calibrated Gamma MH proposal |
-| `stan`            | HMC/NUTS via Stan — reference / gold-standard sampler                |
+| Method            | Description                                                           |
+|-------------------|-----------------------------------------------------------------------|
+| `amh_montoril`    | Adaptive Metropolis-Hastings (componentwise, Robbins–Monro tuning)    |
+| `pg_as`           | Particle Gibbs with Auxiliary Particle Filter / Ancestor Sampling     |
+| `sir_laplace`     | Sampling-Importance-Resampling with Laplace/IRLS approximation        |
+| `sir_collapsed`   | **Main methodological contribution**: Collapsed version of SIR/Laplace|
+| `stan`            | HMC/NUTS via Stan — reference / gold-standard sampler                 |
 
 Two applications are reported:
 
 1. A **simulation study** across a grid of series lengths and function types
-   (piecewise constant, piecewise linear, piecewise quadratic, sinusoidal),
+   (steps, piecewise linear, piecewise quadratic, sinusoidal),
    comparing sampler efficiency and estimation accuracy.
-2. A **real-data application** to the `campy` dataset (weekly campylobacteriosis
+2. A **real-data application** to the `campy` dataset (28-days period campylobacteriosis
    counts, Quebec, 1990–2000; from the `tscount` package), benchmarked against
    two observation-driven models fit with `tscount::tsglm()` and evaluated via
-   one-step-ahead predictive log-likelihood (bootstrap particle filter).
+   one-step-ahead predictive log-likelihood.
 
 ## Repository structure
 
@@ -211,12 +212,9 @@ These are stored per-method in `R_config` inside `simulation/simulation_run.R`.
 ## Production simulation
 
 The full simulation study spans $T \in \{200, 400, 800, 1600\}$, four
-function types, and $R = 200$ replicas for **all five methods**, including
-`stan` (matching the committed results in `results/simulation/`; `stan`'s
-replica count was raised mid-study from an initial $R=50$ reference
-subsample to the full $R=200$ once compute budget allowed it, and
-`R_config` in `simulation_run.R` reflects that final value). It was run on
-an external HPC cluster (PBS Pro scheduler, `batchtools` job arrays), with
+function types, and $R = 200$ replicas for **all five methods**. It was run on
+in the [ICMC Euler Cluster(https://euler.cemeai.icmc.usp.br/) 
+(PBS Pro scheduler, `batchtools` job arrays), with
 each job handling a chunk of tasks (`simulation_run.R` + `simulation_pbs.tmpl`).
 `simulation_grid_config.R` isolates `run_mode` and `grid_subset`, so the
 grid can be edited directly on the cluster without resubmitting the whole
@@ -241,7 +239,7 @@ to sanity-check the pipeline should reduce `grid_subset` in
 ## Real-data application
 
 The `application/` directory holds the full real-data pipeline, applied to
-the `campy` dataset (weekly campylobacteriosis counts, Quebec, 1990–2000;
+the `campy` dataset (28-days period Campylobacteriosis counts, Quebec, 1990–2000;
 `tscount::campy`). All of its outputs are written to `results/application/`.
 
 - **`real_data_run.R`** fits all five PoissonLTDM samplers to `campy`, using
@@ -368,9 +366,7 @@ resolves them correctly.
   `tidyr` (1.3.2) are used only by `tests/test_R_vs_cpp.R` and
   `paper_plots/`, which never ran on the cluster, so they aren't in
   `renv.lock` — install them separately (versions from the development
-  environment) if running those. `coda` isn't listed at all: ESS/R-hat
-  migrated to `posterior` and `PoissonLTDM::rhat_ess_fast()` during
-  development, and no `coda::` call remains in the repository.
+  environment) if running those.
 
 - **System**: a working C++ compiler toolchain for `Rcpp`/`rstan`
   compilation (`gcc`/`g++`, C++17); **FFTW3** and **OpenMP**, needed only to
