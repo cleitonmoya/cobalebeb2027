@@ -5,9 +5,11 @@ application of **"Efficient Samplers for the Poisson Local Trend Dynamic
 Model"**, submitted to the VIII Latin American Meeting on Bayesian Statistics
 (VIII COBAL) / XVIII Brazilian Meeting of Bayesian Statistics (EBEB), 2027.
 
-Authors: 
+**Authors**: 
 * Cleiton Moya de Almeida (PIPGEs UFSCar/USP)
 * Michel Helcias Montoril (UFSCar)
+
+![Posterior fit (95% HPD band) of all five samplers against the campy dataset](paper_plots/plots/real_data/real_data_fit.png)
 
 ## Overview
 
@@ -212,8 +214,8 @@ These are stored per-method in `R_config` inside `simulation/simulation_run.R`.
 ## Production simulation
 
 The full simulation study spans $T \in \{200, 400, 800, 1600\}$, four
-function types, and $R = 200$ replicas for **all five methods**. It was run on
-in the [ICMC Euler Cluster(https://euler.cemeai.icmc.usp.br/) 
+function types, and $R = 200$ replicas for **all five methods**. It was run
+on the [ICMC Euler Cluster](https://euler.cemeai.icmc.usp.br/)
 (PBS Pro scheduler, `batchtools` job arrays), with
 each job handling a chunk of tasks (`simulation_run.R` + `simulation_pbs.tmpl`).
 `simulation_grid_config.R` isolates `run_mode` and `grid_subset`, so the
